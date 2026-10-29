@@ -1,0 +1,1964 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>中華基督會譚李麗芬紀念中學體育科登分系統</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+    <!-- Google Fonts Inter & Noto Sans TC -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght=300;400;500;600;700;800;900&family=Noto+Sans+TC:wght=300;400;500;700;900&display=swap" rel="stylesheet">
+    
+    <!-- React & ReactDOM -->
+    <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+    <!-- Lucide Icons -->
+    <script src="https://cdn.jsdelivr.net/npm/lucide@0.344.0/dist/umd/lucide.min.js"></script>
+    <!-- SheetJS for Excel & CSV Parsing -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+    <style>
+        body {
+            font-family: 'Noto Sans TC', 'Inter', sans-serif;
+            background-color: #f0fdf4; /* 清新綠底 */
+            -webkit-tap-highlight-color: transparent;
+        }
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+</head>
+<body class="text-slate-800 antialiased select-none">
+
+    <!-- React App Container -->
+    <div id="root"></div>
+
+    <script>
+        // =========================================================================
+        // 💡 老師請注意：請將您部署好的 Google Apps Script 網頁應用程式網址填入下方雙引號中！
+        // =========================================================================
+        const DEFAULT_CLOUD_URL = "https://script.google.com/macros/s/AKfycbxs4MQBoj0p5UkUqQuG4lFD4aIrYy_2usc_N1AoTBxfIijren0e40OJq3oPgbI4liGcZg/exec"; 
+
+        const { useState, useEffect, useMemo, createElement, useRef } = React;
+        const e = createElement;
+
+        // ==================== 💡 全域時間分秒輔助函數 ====================
+        const getMinVal = (rawSec) => {
+            if (!rawSec) return "";
+            return Math.floor(rawSec / 60);
+        };
+
+        const getSecVal = (rawSec) => {
+            if (!rawSec) return "";
+            return rawSec % 60;
+        };
+
+        const calcBMI = (h, w) => {
+            const hh = parseFloat(h) || 0, ww = parseFloat(w) || 0;
+            if (hh <= 0 || ww <= 0) return "";
+            return (ww / Math.pow(hh / 100, 2)).toFixed(1);
+        };
+
+        // ==================== 專項運動技能 (6 格，項目可選) ====================
+        const SKILL_SLOTS = 6;
+        const SKILL_MAX_PER_SLOT = 20;   // 每一格最高分
+        const SKILL_TOTAL_CAP = SKILL_SLOTS * SKILL_MAX_PER_SLOT;   // 專項技能總分上限：6 格 × 20 分 = 120 (如要限制，改成想要的數字)
+        const SKILL_OPTIONS = ["籃球", "排球", "足球", "羽毛球", "乒乓球", "跳舞", "田徑", "游泳", "體操", "其他"];
+        const EMPTY_SKILLS = { skillItem1: "", skillPts1: 0, skillItem2: "", skillPts2: 0, skillItem3: "", skillPts3: 0, skillItem4: "", skillPts4: 0, skillItem5: "", skillPts5: 0, skillItem6: "", skillPts6: 0 };
+
+        const calcSkillTotal = (s) => {
+            let t = 0;
+            for (let i = 1; i <= SKILL_SLOTS; i++) t += parseInt(s['skillPts' + i]) || 0;
+            return Math.min(SKILL_TOTAL_CAP, t);
+        };
+
+        // 舊資料 (籃球 / 跳舞 / 其他) 自動轉入新的 6 格，不會丟失原有分數
+        const normalizeStudent = (s) => {
+            if (!s) return s;
+            const out = { ...s };
+            if (out.skillItem1 === undefined && out.skillPts1 === undefined) {
+                [['籃球', out.basketball], ['跳舞', out.dance], ['其他', out.extraSkill]].forEach(([name, v], i) => {
+                    const pts = Math.min(SKILL_MAX_PER_SLOT, Math.max(0, parseInt(v) || 0));
+                    out['skillItem' + (i + 1)] = pts > 0 ? name : '';
+                    out['skillPts' + (i + 1)] = pts;
+                });
+            }
+            for (let i = 1; i <= SKILL_SLOTS; i++) {
+                if (out['skillItem' + i] === undefined) out['skillItem' + i] = '';
+                if (out['skillPts' + i] === undefined) out['skillPts' + i] = 0;
+            }
+            return out;
+        };
+
+        // ==================== ULTRA-SAFE STORAGE SANDBOX WRAPPERS ====================
+        const memoryStorage = {};
+        const safeLocalStorage = {
+            getItem: (key, fallback) => {
+                try {
+                    const val = localStorage.getItem(key);
+                    return val ? JSON.parse(val) : fallback;
+                } catch (err) {
+                    return memoryStorage[key] !== undefined ? memoryStorage[key] : fallback;
+                }
+            },
+            setItem: (key, data) => {
+                try {
+                    localStorage.setItem(key, JSON.stringify(data));
+                    return { success: true };
+                } catch (err) {
+                    memoryStorage[key] = data;
+                    return { success: false, reason: "SecurityError" };
+                }
+            }
+        };
+
+        const safeSessionStorage = {
+            getItem: (key, fallback) => {
+                try {
+                    const val = sessionStorage.getItem(key);
+                    return val !== null ? val : fallback;
+                } catch (err) {
+                    return memoryStorage[key] !== undefined ? memoryStorage[key] : fallback;
+                }
+            },
+            setItem: (key, value) => {
+                try {
+                    sessionStorage.setItem(key, value);
+                    return true;
+                } catch (err) {
+                    memoryStorage[key] = value;
+                    return false;
+                }
+            }
+        };
+
+        // 預設學生名單 (已將所有成績、出席率及 DSE 數據完全重置為 0)
+        const DEFAULT_STUDENTS = [];
+
+        const CONDUCT_RULES = {
+            "A": 20, "A-": 18, "B+": 16, "B": 14, "B-": 12, "C+": 10, "C": 8, "C-": 6, "D": 4, "F": 0
+        };
+
+        // 🎓 DSE 評分標準：對照您提供的 Excel 設計的 5 分滿分制 (每個項目 5 分滿分，共 20 分)
+        const DEFAULT_DSE_SITUP_RULES = {
+            M: [ {score:5, req:45}, {score:4, req:38}, {score:3, req:30}, {score:2, req:20}, {score:1, req:10} ],
+            F: [ {score:5, req:36}, {score:4, req:30}, {score:3, req:23}, {score:2, req:15}, {score:1, req:8} ]
+        };
+
+        const DEFAULT_DSE_PULLUP_RULES = {
+            M: [ {score:5, req:12}, {score:4, req:9}, {score:3, req:6}, {score:2, req:3}, {score:1, req:1} ], // 男生：引體上升次數
+            F: [ {score:5, req:30}, {score:4, req:22}, {score:3, req:15}, {score:2, req:9}, {score:1, req:4} ]  // 女生：屈臂懸垂秒數
+        };
+
+        const DEFAULT_DSE_RUN1609_RULES = {
+            M: [ {score:5, req:330}, {score:4, req:380}, {score:3, req:440}, {score:2, req:510}, {score:1, req:600} ], // 1609米跑秒數 (越短越快)
+            F: [ {score:5, req:420}, {score:4, req:480}, {score:3, req:550}, {score:2, req:630}, {score:1, req:720} ]
+        };
+
+        const DEFAULT_DSE_SIT_REACH_RULES = {
+            M: [ {score:5, req:40}, {score:4, req:34}, {score:3, req:28}, {score:2, req:21}, {score:1, req:15} ],
+            F: [ {score:5, req:43}, {score:4, req:37}, {score:3, req:31}, {score:2, req:25}, {score:1, req:18} ]
+        };
+
+        const DEFAULT_SIT_UP_RULES_BY_FORM = {
+            "1": { M: [ {score:20, req:22}, {score:16, req:18}, {score:12, req:14}, {score:10, req:11}, {score:6, req:7}, {score:4, req:4}, {score:2, req:1} ], F: [ {score:20, req:20}, {score:16, req:16}, {score:12, req:12}, {score:10, req:9}, {score:6, req:5}, {score:4, req:2}, {score:2, req:1} ] },
+            "2": { M: [ {score:20, req:25}, {score:16, req:21}, {score:12, req:17}, {score:10, req:13}, {score:6, req:9}, {score:4, req:5}, {score:2, req:1} ], F: [ {score:20, req:23}, {score:16, req:19}, {score:12, req:15}, {score:10, req:11}, {score:6, req:7}, {score:4, req:3}, {score:2, req:1} ] },
+            "3": { M: [ {score:20, req:28}, {score:16, req:24}, {score:12, req:20}, {score:10, req:16}, {score:6, req:11}, {score:4, req:6}, {score:2, req:1} ], F: [ {score:20, req:26}, {score:16, req:22}, {score:12, req:18}, {score:10, req:13}, {score:6, req:9}, {score:4, req:4}, {score:2, req:1} ] },
+            "4": { M: [ {score:20, req:32}, {score:16, req:28}, {score:12, req:23}, {score:10, req:18}, {score:6, req:13}, {score:4, req:7}, {score:2, req:1} ], F: [ {score:20, req:29}, {score:16, req:25}, {score:12, req:20}, {score:10, req:15}, {score:6, text:10, req:10}, {score:4, req:5}, {score:2, req:1} ] },
+            "5": { M: [ {score:20, req:38}, {score:16, req:33}, {score:12, req:27}, {score:10, req:21}, {score:6, req:15}, {score:4, req:8}, {score:2, req:1} ], F: [ {score:20, req:33}, {score:16, req:28}, {score:12, req:23}, {score:10, req:17}, {score:6, req:11}, {score:4, req:6}, {score:2, req:1} ] },
+            "6": { M: [ {score:20, req:45}, {score:16, req:38}, {score:12, req:30}, {score:10, req:24}, {score:6, req:17}, {score:4, req:9}, {score:2, req:1} ], F: [ {score:20, req:36}, {score:16, req:30}, {score:12, req:25}, {score:10, req:19}, {score:6, req:12}, {score:4, req:7}, {score:2, req:2} ] }
+        };
+
+        const DEFAULT_PUSH_UP_RULES_BY_FORM = {
+            "1": { M: [ {score:20, req:20}, {score:16, req:16}, {score:12, req:12}, {score:10, req:9}, {score:6, req:6}, {score:4, req:3}, {score:2, req:1} ], F: [ {score:20, req:15}, {score:16, req:12}, {score:12, req:9}, {score:10, req:7}, {score:6, req:5}, {score:4, req:2}, {score:2, req:1} ] },
+            "2": { M: [ {score:20, req:22}, {score:16, req:18}, {score:12, req:14}, {score:10, req:11}, {score:6, req:8}, {score:4, req:4}, {score:2, req:1} ], F: [ {score:20, req:17}, {score:16, req:14}, {score:12, text:11, req:11}, {score:10, req:9}, {score:6, req:6}, {score:4, req:3}, {score:2, req:1} ] },
+            "3": { M: [ {score:20, req:25}, {score:16, req:21}, {score:12, req:17}, {score:10, req:13}, {score:6, req:10}, {score:4, req:5}, {score:2, req:1} ], F: [ {score:20, req:20}, {score:16, req:16}, {score:12, req:13}, {score:10, req:11}, {score:6, req:8}, {score:4, req:4}, {score:2, req:1} ] },
+            "4": { M: [ {score:20, req:28}, {score:16, req:24}, {score:12, req:20}, {score:10, req:15}, {score:6, req:11}, {score:4, req:6}, {score:2, req:1} ], F: [ {score:20, req:22}, {score:16, req:18}, {score:12, req:15}, {score:10, req:12}, {score:6, req:9}, {score:4, req:5}, {score:2, req:1} ] },
+            "5": { M: [ {score:20, req:32}, {score:16, req:28}, {score:12, req:23}, {score:10, req:18}, {score:6, req:13}, {score:4, req:7}, {score:2, req:1} ], F: [ {score:20, req:25}, {score:16, req:21}, {score:12, req:17}, {score:10, req:14}, {score:6, req:11}, {score:4, req:6}, {score:2, req:1} ] },
+            "6": { M: [ {score:20, req:35}, {score:16, req:31}, {score:12, req:26}, {score:10, req:20}, {score:6, req:15}, {score:4, req:8}, {score:2, req:1} ], F: [ {score:20, req:28}, {score:16, req:24}, {score:12, req:20}, {score:10, req:16}, {score:6, req:12}, {score:4, req:7}, {score:2, req:1} ] }
+        };
+
+        const DEFAULT_RUN_RULES_BY_FORM = {
+            "1": { M: [ {score:20, req:15}, {score:18, req:14}, {score:16, req:13}, {score:14, req:12}, {score:12, req:11}, {score:10, req:10}, {score:8, req:9}, {score:6, req:8}, {score:4, req:7}, {score:2, req:6} ], F: [ {score:20, req:13}, {score:18, req:12}, {score:16, req:11}, {score:14, req:10}, {score:12, req:9}, {score:10, text:8, req:8}, {score:8, text:7, req:7}, {score:6, req:6}, {score:4, req:5}, {score:2, req:4} ] },
+            "2": { M: [ {score:20, req:17}, {score:18, req:16}, {score:16, req:15}, {score:14, req:14}, {score:12, req:13}, {score:10, req:12}, {score:8, req:11}, {score:6, req:10}, {score:4, req:9}, {score:2, req:8} ], F: [ {score:20, req:15}, {score:18, req:14}, {score:16, req:13}, {score:14, req:12}, {score:12, req:11}, {score:10, req:10}, {score:8, req:9}, {score:6, req:8}, {score:4, req:7}, {score:2, req:6} ] },
+            "3": { M: [ {score:20, req:18}, {score:18, req:17}, {score:16, req:16}, {score:14, req:15}, {score:12, text:12, req:12}, {score:10, req:11}, {score:8, req:10}, {score:6, req:9}, {score:4, req:8}, {score:2, text:7} ], F: [ {score:20, req:16}, {score:18, req:15}, {score:16, req:14}, {score:14, req:13}, {score:12, text:12, req:12}, {score:10, req:11}, {score:8, req:10}, {score:6, req:9}, {score:4, req:8}, {score:2, text:7} ] },
+            "4": { M: [ {score:20, req:19}, {score:18, req:18}, {score:16, req:17}, {score:14, req:16}, {score:12, req:15}, {score:10, req:14}, {score:8, text:12, req:12}, {score:4, req:11}, {score:2, req:10} ], F: [ {score:20, req:17}, {score:18, req:16}, {score:16, req:15}, {score:14, text:14, req:14}, {score:12, req:13}, {score:10, req:12}, {score:8, req:11}, {score:6, text:10, req:10}, {score:4, req:9}, {score:2, req:8} ] },
+            "5": { M: [ {score:20, req:20}, {score:18, req:19}, {score:16, req:18}, {score:14, req:17}, {score:12, req:16}, {score:10, req:15}, {score:8, req:14}, {score:6, req:13}, {score:4, req:12}, {score:2, req:11} ], F: [ {score:20, req:18}, {score:18, req:17}, {score:16, req:16}, {score:14, req:15}, {score:12, req:14}, {score:10, req:13}, {score:8, req:12}, {score:6, req:11}, {score:4, req:10}, {score:2, req:9} ] },
+            "6": { M: [ {score:20, req:21}, {score:18, req:20}, {score:16, req:19}, {score:14, req:18}, {score:12, req:17}, {score:10, req:16}, {score:8, req:15}, {score:6, req:14}, {score:4, req:13}, {score:2, req:12} ], F: [ {score:20, req:19}, {score:18, req:18}, {score:16, req:17}, {score:14, req:16}, {score:12, req:15}, {score:10, req:11}, {score:2, req:10} ] }
+        };
+
+        const DEFAULT_SIT_REACH_RULES_BY_FORM = {
+            "1": { M: [ {score:20, req:30}, {score:16, req:25}, {score:12, req:20}, {score:10, req:15}, {score:6, req:10}, {score:4, req:5}, {score:2, req:1} ], F: [ {score:20, req:33}, {score:16, req:28}, {score:12, req:23}, {score:10, req:18}, {score:6, req:13}, {score:4, req:8}, {score:2, req:2} ] },
+            "2": { M: [ {score:20, req:32}, {score:16, req:27}, {score:12, req:22}, {score:10, req:17}, {score:6, req:12}, {score:4, req:7}, {score:2, req:1} ], F: [ {score:20, req:35}, {score:16, req:30}, {score:12, req:25}, {score:10, req:20}, {score:6, req:15}, {score:4, text:10, req:10}, {score:2, req:2} ] },
+            "3": { M: [ {score:20, req:34}, {score:16, req:29}, {score:12, req:24}, {score:10, req:19}, {score:6, req:14}, {score:4, req:9}, {score:2, req:1} ], F: [ {score:20, req:37}, {score:16, req:32}, {score:12, req:27}, {score:10, req:22}, {score:6, req:17}, {score:4, req:12}, {score:2, req:2} ] },
+            "4": { M: [ {score:20, req:36}, {score:16, req:31}, {score:12, req:26}, {score:10, req:21}, {score:6, req:16}, {score:4, req:11}, {score:2, req:1} ], F: [ {score:20, req:39}, {score:16, req:34}, {score:12, req:29}, {score:10, req:24}, {score:6, req:19}, {score:4, req:14}, {score:2, req:2} ] },
+            "5": { M: [ {score:20, req:38}, {score:16, req:33}, {score:12, req:28}, {score:10, req:23}, {score:6, req:18}, {score:4, req:13}, {score:2, req:1} ], F: [ {score:20, req:41}, {score:16, req:36}, {score:12, req:31}, {score:10, req:26}, {score:6, req:21}, {score:4, req:16}, {score:2, text:2} ] },
+            "6": { M: [ {score:20, req:40}, {score:16, req:35}, {score:12, req:30}, {score:10, req:25}, {score:6, req:20}, {score:4, req:15}, {score:2, req:1} ], F: [ {score:20, req:43}, {score:16, req:38}, {score:12, req:33}, {score:10, req:28}, {score:6, req:23}, {score:4, req:18}, {score:2, req:2} ] }
+        };
+
+        const DEFAULT_RUN_1000_RULES_BY_FORM = {
+            "1": { M: [ {score:20, req:220}, {score:18, req:240}, {score:16, req:260}, {score:14, req:280}, {score:12, req:300}, {score:10, req:320}, {score:8, req:350}, {score:6, req:380}, {score:4, req:410}, {score:2, req:450} ], F: [ {score:20, req:250}, {score:18, req:270}, {score:16, req:290}, {score:14, req:310}, {score:12, req:330}, {score:10, req:350}, {score:8, req:380}, {score:6, req:410}, {score:4, req:440}, {score:2, req:480} ] },
+            "2": { M: [ {score:20, req:210}, {score:18, req:230}, {score:16, req:250}, {score:14, req:270}, {score:12, req:290}, {score:10, req:310}, {score:8, req:340}, {score:6, req:370}, {score:4, req:400}, {score:2, req:440} ], F: [ {score:20, req:240}, {score:18, req:260}, {score:16, req:280}, {score:14, req:300}, {score:12, req:320}, {score:10, req:340}, {score:8, req:370}, {score:6, req:400}, {score:4, req:430}, {score:2, req:470} ] },
+            "3": { M: [ {score:20, req:200}, {score:18, req:220}, {score:16, req:240}, {score:14, req:260}, {score:12, req:280}, {score:10, req:300}, {score:8, req:330}, {score:6, req:360}, {score:4, req:390}, {score:2, req:430} ], F: [ {score:20, req:235}, {score:18, req:255}, {score:16, req:275}, {score:14, req:295}, {score:12, req:315}, {score:10, req:335}, {score:8, req:365}, {score:6, req:395}, {score:4, req:425}, {score:2, req:465} ] },
+            "4": { M: [ {score:20, req:195}, {score:18, req:210}, {score:16, req:230}, {score:14, req:250}, {score:12, req:270}, {score:10, req:290}, {score:8, text:390, req:390}, {score:4, req:420}, {score:2, req:460} ], F: [ {score:20, req:230}, {score:18, req:255}, {score:16, req:275}, {score:14, req:295}, {score:12, req:315}, {score:10, req:335}, {score:8, req:365}, {score:6, req:395}, {score:4, req:425}, {score:2, req:465} ] },
+            "5": { M: [ {score:20, req:190}, {score:18, req:205}, {score:16, req:225}, {score:14, req:245}, {score:12, req:265}, {score:10, req:285}, {score:8, text:375, req:375}, {score:4, req:415}, {score:2, req:455} ], F: [ {score:20, req:225}, {score:18, req:245}, {score:16, req:265}, {score:14, req:285}, {score:12, req:305}, {score:10, req:325}, {score:8, req:355}, {score:6, req:385}, {score:4, req:415}, {score:2, req:455} ] },
+            "6": { M: [ {score:20, req:185}, {score:18, req:200}, {score:16, req:220}, {score:14, req:240}, {score:12, req:260}, {score:10, req:280}, {score:8, req:310}, {score:6, req:340}, {score:4, req:370}, {score:2, req:410} ], F: [ {score:20, req:220}, {score:18, req:240}, {score:16, req:260}, {score:14, req:280}, {score:12, req:300}, {score:10, req:320}, {score:8, req:350}, {score:6, req:380}, {score:4, req:410}, {score:2, req:450} ] }
+        };
+
+        function Icon({ name, className }) {
+            return e('i', { 'data-lucide': name, className: className });
+        }
+
+        // ==================== 🛠 *全域時間分秒輔助函數與提示 (安全提升)* ====================
+        function showToast(message, type = 'success') {
+            const toastEl = document.getElementById('pe-toast');
+            if (toastEl) {
+                toastEl.innerText = message;
+                toastEl.className = `fixed top-4 right-4 z-50 flex items-center gap-2 px-4 py-3 rounded-xl shadow-xl font-semibold text-xs tracking-wide border transition-all ${type === 'error' ? 'bg-rose-50 border-rose-200 text-rose-800' : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`;
+                toastEl.style.display = 'flex';
+                setTimeout(() => { toastEl.style.display = 'none'; }, 3000);
+            }
+        }
+
+        function App() {
+            const [isAuthenticated, setIsAuthenticated] = useState(() => safeSessionStorage.getItem('pe_app_authenticated', 'false') === 'true');
+            const [passwordInput, setPasswordInput] = useState('');
+            const [authError, setAuthError] = useState('');
+            const [showPassword, setShowPassword] = useState(false);
+
+            // 💡 關鍵更動：所有 LocalStorage 金鑰從 v16_force 全部升級到 v17_clear 以強制重寫並乾淨初始！
+            const [students, setStudents] = useState(() => (safeLocalStorage.getItem('pe_students_data_v17_clear', DEFAULT_STUDENTS) || []).map(normalizeStudent));
+            const [activeTab, setActiveTab] = useState('mobile'); 
+            const [searchQuery, setSearchQuery] = useState('');
+            const [selectedClass, setSelectedClass] = useState('All');
+            const [currentMobileIndex, setCurrentMobileIndex] = useState(0);
+
+            const [currentPage, setCurrentPage] = useState(1);
+            const ITEMS_PER_PAGE = 15; 
+
+            // 常規常模編輯選擇年級
+            const [editingSitUpForm, setEditingSitUpForm] = useState("2");
+            const [editingPushUpForm, setEditingPushUpForm] = useState("2");
+            const [editingRunForm, setEditingRunForm] = useState("2");
+            const [editingSitReachForm, setEditingSitReachForm] = useState("2");
+            const [editingRun1000Form, setEditingRun1000Form] = useState("2");
+
+            // DSE 常模編輯項目
+            const [dseEditingTab, setDseEditingTab] = useState("situp");
+
+            // 等第分界線 (回歸 100 分上限封頂制)
+            const [thresholds, setThresholds] = useState(() => safeLocalStorage.getItem('pe_grade_thresholds_v17_clear', { A: 89.5, B: 79.5, C: 69.5, D: 59.5, E: 49.5 }));
+            const [tempThresholds, setTempThresholds] = useState({ ...thresholds });
+
+            const [sitUpRulesByForm, setSitUpRulesByForm] = useState(() => safeLocalStorage.getItem('pe_sit_up_rules_by_form_v17_clear', DEFAULT_SIT_UP_RULES_BY_FORM));
+            const [pushUpRulesByForm, setPushUpRulesByForm] = useState(() => safeLocalStorage.getItem('pe_push_up_rules_by_form_v17_clear', DEFAULT_PUSH_UP_RULES_BY_FORM));
+            const [runRulesByForm, setRunRulesByForm] = useState(() => safeLocalStorage.getItem('pe_run_rules_by_form_v17_clear', DEFAULT_RUN_RULES_BY_FORM));
+            const [sitReachRulesByForm, setSitReachRulesByForm] = useState(() => safeLocalStorage.getItem('pe_sit_reach_rules_by_form_v17_clear', DEFAULT_SIT_REACH_RULES_BY_FORM));
+            const [run1000RulesByForm, setRun1000RulesByForm] = useState(() => safeLocalStorage.getItem('pe_run_1000_rules_by_form_v17_clear', DEFAULT_RUN_1000_RULES_BY_FORM));
+
+            // DSE 項目常模基準狀態 (已安全改為最高 5分 制，長度 5)
+            const [dseSitUpRules, setDseSitUpRules] = useState(() => safeLocalStorage.getItem('pe_dse_situp_rules_v17_clear', DEFAULT_DSE_SITUP_RULES));
+            const [dsePullUpRules, setDsePullUpRules] = useState(() => safeLocalStorage.getItem('pe_dse_pullup_rules_v17_clear', DEFAULT_DSE_PULLUP_RULES));
+            const [dseRun1609Rules, setDseRun1609Rules] = useState(() => safeLocalStorage.getItem('pe_dse_run1609_rules_v17_clear', DEFAULT_DSE_RUN1609_RULES));
+            const [dseSitReachRules, setDseSitReachRules] = useState(() => safeLocalStorage.getItem('pe_dse_sitreach_rules_v17_clear', DEFAULT_DSE_SIT_REACH_RULES));
+
+            const [importModalOpen, setImportModalOpen] = useState(false);
+            const [previewStudents, setPreviewStudents] = useState([]);
+            const [importError, setImportError] = useState("");
+            const [addModalOpen, setAddModalOpen] = useState(false);
+            
+            // 💡 預設一千米跑 (run1000Raw) 和 DSE 1609米跑 (dseRun1609Raw) 為 0 
+            const [newStudent, setNewStudent] = useState({ class: "2A", number: "", name: "", gender: "M", isDsePe: false, attendance: 0, conductGrade: "B", sitUpsRaw: 0, pushUpsRaw: 0, runLapsRaw: 0, sitReachRaw: 0, run1000Raw: 0, dseSitUpsRaw: 0, dsePullUpsRaw: 0, dseRun1609Raw: 0, dseSitReachRaw: 0, ...EMPTY_SKILLS });
+            const [confirmModal, setConfirmModal] = useState(null);
+
+            const [hasUnsavedConfig, setHasUnsavedConfig] = useState(false);
+
+            // 🖊 本機「尚未同步」的修改欄位：同步時只上傳這些欄位，避免覆蓋其他老師已輸入的成績
+            const [dirty, setDirty] = useState(() => safeLocalStorage.getItem('pe_dirty_v1', {}));
+            const dirtyRef = useRef(dirty);
+            const importColsRef = useRef({});
+            const baseRef = useRef({});   // 最近一次從雲端讀到的資料，用來判斷「本機哪些欄位真的跟雲端不同」
+            useEffect(() => { dirtyRef.current = dirty; safeLocalStorage.setItem('pe_dirty_v1', dirty); }, [dirty]);
+
+            // 匯出篩選控制
+            const [exportModalOpen, setExportModalOpen] = useState(false);
+            const [exportScope, setExportScope] = useState("all"); 
+            const [exportTargetClass, setExportTargetClass] = useState("All");
+            const [exportTargetGrade, setExportTargetGrade] = useState("2"); 
+
+            // 雲端 Apps Script
+            const [cloudUrl, setCloudUrl] = useState(() => safeLocalStorage.getItem('pe_cloud_url_v17_clear', DEFAULT_CLOUD_URL));
+            const [isSyncing, setIsSyncing] = useState(false);
+            const [isCloudLoading, setIsCloudLoading] = useState(false);
+            const [cloudConnectionStatus, setCloudConnectionStatus] = useState("pending");
+
+            const pwdRef = useRef(passwordInput);
+            useEffect(() => {
+                pwdRef.current = passwordInput;
+            }, [passwordInput]);
+
+            function handleLoginAttempt(pwd) {
+                if (pwd === '60706759') {
+                    setIsAuthenticated(true);
+                    safeSessionStorage.setItem('pe_app_authenticated', 'true');
+                    setAuthError('');
+                    showToast("🔓 系統安全解鎖！");
+                } else {
+                    setAuthError('密碼錯誤，請重新輸入。');
+                    setPasswordInput('');
+                }
+            }
+
+            useEffect(() => {
+                if (isAuthenticated) return;
+                const handleKeyDown = (event) => {
+                    if (/^[0-9]$/.test(event.key)) {
+                        setAuthError('');
+                        setPasswordInput(prev => prev + event.key);
+                    } else if (event.key === 'Backspace') {
+                        setPasswordInput(prev => prev.slice(0, -1));
+                    } else if (event.key === 'Enter') {
+                        event.preventDefault();
+                        handleLoginAttempt(pwdRef.current);
+                    } else if (event.key === 'Escape') {
+                        setPasswordInput('');
+                    }
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, [isAuthenticated]);
+
+            const loadDataFromCloud = async (opts) => {
+                const silent = opts && opts.silent === true;
+                const targetUrl = cloudUrl || DEFAULT_CLOUD_URL;
+                if (!targetUrl || !targetUrl.startsWith('https://script.google.com/')) {
+                    setCloudConnectionStatus("failed");
+                    return; 
+                }
+                setIsCloudLoading(true);
+                try {
+                    const response = await fetch(targetUrl, {
+                        method: 'POST',
+                        mode: 'cors',
+                        redirect: 'follow',
+                        body: JSON.stringify({ action: 'read' })
+                    });
+                    if (!response.ok) throw new Error(`HTTP 狀態碼錯誤: ${response.status}`);
+                    const result = await response.json();
+                    if (result.status === 'success') {
+                        if (result.data && result.data.length > 0) {
+                            result.data.forEach(d => { baseRef.current[d.id] = { ...normalizeStudent(d) }; });
+                            const localMap = {};
+                            students.forEach(s => { localMap[s.id] = s; });
+                            const dirtyNow = dirtyRef.current || {};
+                            const cloudIds = {};
+                            const merged = result.data.map(d => {
+                                cloudIds[d.id] = true;
+                                const loc = localMap[d.id];
+                                const out = { ...d };
+                                // 本機尚未同步的欄位優先保留，不會被雲端舊值蓋掉
+                                if (loc && dirtyNow[d.id]) Object.keys(dirtyNow[d.id]).forEach(k => { out[k] = loc[k]; });
+                                return out;
+                            });
+                            // 本機新增、尚未同步到雲端的學生也保留
+                            students.forEach(s => { if (!cloudIds[s.id] && dirtyNow[s.id]) merged.push(s); });
+                            const normalizedMerged = merged.map(normalizeStudent);
+                            setStudents(normalizedMerged);
+                        }
+                        if (result.config) {
+                            const c = result.config;
+                            if (c.thresholds) {
+                                setThresholds(c.thresholds);
+                                setTempThresholds(c.thresholds);
+                            }
+                            if (c.sitUpRules) setSitUpRulesByForm(c.sitUpRules);
+                            if (c.pushUpRules) setPushUpRulesByForm(c.pushUpRules);
+                            if (c.runRules) setRunRulesByForm(c.runRules);
+                            if (c.sitReachRules) setSitReachRulesByForm(c.sitReachRules);
+                            if (c.run1000Rules) setRun1000RulesByForm(c.run1000Rules);
+
+                            // 🛡️ 雲端舊數據安全過濾：確保載入的 DSE 常模長度恰好為 5，防止 25級 覆蓋
+                            if (c.dseSitUpRules && c.dseSitUpRules.M && c.dseSitUpRules.M.length === 5) setDseSitUpRules(c.dseSitUpRules);
+                            if (c.dsePullUpRules && c.dsePullUpRules.M && c.dsePullUpRules.M.length === 5) setDsePullUpRules(c.dsePullUpRules);
+                            if (c.dseRun1609Rules && c.dseRun1609Rules.M && c.dseRun1609Rules.M.length === 5) setDseRun1609Rules(c.dseRun1609Rules);
+                            if (c.dseSitReachRules && c.dseSitReachRules.M && c.dseSitReachRules.M.length === 5) setDseSitReachRules(c.dseSitReachRules);
+                        }
+                        setCloudConnectionStatus("success");
+                        setHasUnsavedConfig(false);
+                        if (!silent) showToast("☁️ 雙向自動同步成功！已成功加載雲端自訂常模與分數標準。");
+                    } else {
+                        throw new Error(result.message || 'Apps Script 無效格式');
+                    }
+                } catch (err) {
+                    console.error("雲端讀取失敗：", err);
+                    setCloudConnectionStatus("failed");
+                    showToast("⚠️ 無法連線至雲端，系統正在使用本機暫存模式運作。", "error");
+                } finally {
+                    setIsCloudLoading(false);
+                }
+            };
+
+            useEffect(() => {
+                if (isAuthenticated) {
+                    loadDataFromCloud();
+                }
+            }, [isAuthenticated]);
+
+            const testCloudConnection = async () => {
+                showToast("⚡ 正在發送測試連線請求...");
+                await loadDataFromCloud();
+            };
+
+            useEffect(() => {
+                if (window.lucide) window.lucide.createIcons();
+            });
+
+            const getFormOfStudent = (studentClass) => {
+                const match = String(studentClass || "").trim().match(/^([1-6])/);
+                return match ? match[1] : "2"; 
+            };
+
+            // ==================== 5項常規體能核心計分 (每項 20 分) ====================
+            const calculateSitUpScore = (gender, count, studentClass) => {
+                const raw = parseInt(count) || 0;
+                const form = getFormOfStudent(studentClass);
+                const formRules = sitUpRulesByForm[form] || sitUpRulesByForm["2"];
+                const rules = gender === 'M' ? formRules.M : formRules.F;
+                for (let i = 0; i < rules.length; i++) {
+                    if (raw >= rules[i].req) return rules[i].score;
+                }
+                return 0;
+            };
+
+            const calculatePushUpScore = (gender, count, studentClass) => {
+                const raw = parseInt(count) || 0;
+                const form = getFormOfStudent(studentClass);
+                const formRules = pushUpRulesByForm[form] || pushUpRulesByForm["2"];
+                const rules = gender === 'M' ? formRules.M : formRules.F;
+                for (let i = 0; i < rules.length; i++) {
+                    if (raw >= rules[i].req) return rules[i].score;
+                }
+                return 0;
+            };
+
+            const calculateRunScore = (gender, laps, studentClass) => {
+                const raw = parseInt(laps) || 0;
+                const form = getFormOfStudent(studentClass);
+                const formRules = runRulesByForm[form] || runRulesByForm["2"];
+                const rules = gender === 'M' ? formRules.M : formRules.F;
+                for (let i = 0; i < rules.length; i++) {
+                    if (raw >= rules[i].req) return rules[i].score;
+                }
+                return 0;
+            };
+
+            const calculateSitReachScore = (gender, cm, studentClass) => {
+                const raw = parseInt(cm) || 0;
+                const form = getFormOfStudent(studentClass);
+                const formRules = sitReachRulesByForm[form] || sitReachRulesByForm["2"];
+                const rules = gender === 'M' ? formRules.M : formRules.F;
+                for (let i = 0; i < rules.length; i++) {
+                    if (raw >= rules[i].req) return rules[i].score;
+                }
+                return 0;
+            };
+
+            const calculateRun1000Score = (gender, seconds, studentClass) => {
+                const raw = parseInt(seconds) || 9999;
+                if (raw === 0 || raw === 9999) return 0; // 💡 0秒代表未登分，計為 0 分
+                const form = getFormOfStudent(studentClass);
+                const formRules = run1000RulesByForm[form] || run1000RulesByForm["2"];
+                const rules = gender === 'M' ? formRules.M : formRules.F;
+                for (let i = 0; i < rules.length; i++) {
+                    if (raw <= rules[i].req) return rules[i].score;
+                }
+                return 0;
+            };
+
+            // ==================== 4項 DSE 核心計分 (每項最高得分 5 分) ====================
+            const calculateDseSitUpScore = (gender, count) => {
+                const raw = parseInt(count) || 0;
+                const rules = gender === 'M' ? dseSitUpRules.M : dseSitUpRules.F;
+                for (let i = 0; i < rules.length; i++) {
+                    if (raw >= rules[i].req) return rules[i].score;
+                }
+                return 0;
+            };
+
+            const calculateDsePullUpScore = (gender, count) => {
+                const raw = parseInt(count) || 0;
+                const rules = gender === 'M' ? dsePullUpRules.M : dsePullUpRules.F;
+                for (let i = 0; i < rules.length; i++) {
+                    if (raw >= rules[i].req) return rules[i].score;
+                }
+                return 0;
+            };
+
+            const calculateDseRun1609Score = (gender, seconds) => {
+                const raw = parseInt(seconds) || 9999;
+                if (raw === 0 || raw === 9999) return 0; // 💡 0秒代表未登分，計為 0 分
+                const rules = gender === 'M' ? dseRun1609Rules.M : dseRun1609Rules.F;
+                for (let i = 0; i < rules.length; i++) {
+                    if (raw <= rules[i].req) return rules[i].score;
+                }
+                return 0;
+            };
+
+            const calculateDseSitReachScore = (gender, cm) => {
+                const raw = parseInt(cm) || 0;
+                const rules = gender === 'M' ? dseSitReachRules.M : dseSitReachRules.F;
+                for (let i = 0; i < rules.length; i++) {
+                    if (raw >= rules[i].req) return rules[i].score;
+                }
+                return 0;
+            };
+
+            // 最終等第 100 分上限安全封頂
+            const calculateGrade = (total100) => {
+                if (total100 >= thresholds.A) return 'A';
+                if (total100 >= thresholds.B) return 'B';
+                if (total100 >= thresholds.C) return 'C';
+                if (total100 >= thresholds.D) return 'D';
+                if (total100 >= thresholds.E) return 'E';
+                return 'F';
+            };
+
+            const getFormChineseLabel = (numStr) => {
+                switch(numStr) {
+                    case "1": return "一"; case "2": return "二"; case "3": return "三";
+                    case "4": return "四"; case "5": return "五"; case "6": return "六";
+                    default: return numStr;
+                }
+            };
+
+            const formatTime = (totalSec) => {
+                const m = Math.floor(totalSec / 60);
+                const s = totalSec % 60;
+                return `${m}分${s < 10 ? '0' : ''}${s}秒`;
+            };
+
+            // 💡 所有 LocalStorage 同步鍵為 v17_clear 以強制重新寫入乾淨的預設 0秒 資料 (解決緩存舊秒數殘留問題)
+            useEffect(() => { safeLocalStorage.setItem('pe_grade_thresholds_v17_clear', thresholds); }, [thresholds]);
+            useEffect(() => { safeLocalStorage.setItem('pe_sit_up_rules_by_form_v17_clear', sitUpRulesByForm); }, [sitUpRulesByForm]);
+            useEffect(() => { safeLocalStorage.setItem('pe_push_up_rules_by_form_v17_clear', pushUpRulesByForm); }, [pushUpRulesByForm]);
+            useEffect(() => { safeLocalStorage.setItem('pe_run_rules_by_form_v17_clear', runRulesByForm); }, [runRulesByForm]);
+            useEffect(() => { safeLocalStorage.setItem('pe_sit_reach_rules_by_form_v17_clear', sitReachRulesByForm); }, [sitReachRulesByForm]);
+            useEffect(() => { safeLocalStorage.setItem('pe_run_1000_rules_by_form_v17_clear', run1000RulesByForm); }, [run1000RulesByForm]);
+            
+            useEffect(() => { safeLocalStorage.setItem('pe_dse_situp_rules_v17_clear', dseSitUpRules); }, [dseSitUpRules]);
+            useEffect(() => { safeLocalStorage.setItem('pe_dse_pullup_rules_v17_clear', dsePullUpRules); }, [dsePullUpRules]);
+            useEffect(() => { safeLocalStorage.setItem('pe_dse_run1609_rules_v17_clear', dseRun1609Rules); }, [dseRun1609Rules]);
+            useEffect(() => { safeLocalStorage.setItem('pe_dse_sitreach_rules_v17_clear', dseSitReachRules); }, [dseSitReachRules]);
+
+            useEffect(() => { safeLocalStorage.setItem('pe_students_data_v17_clear', students); }, [students]);
+            useEffect(() => { safeLocalStorage.setItem('pe_cloud_url_v17_clear', cloudUrl); }, [cloudUrl]);
+
+            const filteredStudents = useMemo(() => {
+                return students.filter(student => {
+                    const name = (student.name || "").toLowerCase();
+                    const no = (student.number || "").toString().toLowerCase();
+                    const q = searchQuery.toLowerCase();
+                    const matchesSearch = name.includes(q) || no.includes(q);
+                    const matchesClass = selectedClass === 'All' || student.class === selectedClass;
+                    return matchesSearch && matchesClass;
+                });
+            }, [students, searchQuery, selectedClass]);
+
+            const classesList = useMemo(() => {
+                return ['All', ...new Set(students.map(s => s.class))].sort();
+            }, [students]);
+
+            const totalPages = Math.ceil(filteredStudents.length / ITEMS_PER_PAGE) || 1;
+            const paginatedStudents = useMemo(() => {
+                const start = (currentPage - 1) * ITEMS_PER_PAGE;
+                return filteredStudents.slice(start, start + ITEMS_PER_PAGE);
+            }, [filteredStudents, currentPage]);
+
+            const currentMobileIndexSafe = Math.min(currentMobileIndex, Math.max(0, filteredStudents.length - 1));
+            const currentStudent = filteredStudents[currentMobileIndexSafe] || null;
+
+            const updateStudentValue = (id, field, val) => {
+                setDirty(prev => ({ ...prev, [id]: { ...(prev[id] || {}), [field]: true } }));
+                setStudents(prev => {
+                    const next = prev.map(student => {
+                        if (student.id === id) {
+                            let updated = { ...student, [field]: val };
+                            if (field === 'class') updated.class = String(val || "").toUpperCase();
+                            if (field === 'attendance') updated.attendance = Math.min(20, Math.max(0, parseInt(val) || 0));
+                            if (field === 'sitUpsRaw') updated.sitUpsRaw = Math.max(0, parseInt(val) || 0);
+                            if (field === 'pushUpsRaw') updated.pushUpsRaw = Math.max(0, parseInt(val) || 0);
+                            if (field === 'runLapsRaw') updated.runLapsRaw = Math.max(0, parseInt(val) || 0);
+                            if (field === 'sitReachRaw') updated.sitReachRaw = Math.max(0, parseInt(val) || 0);
+                            if (field === 'run1000Raw') updated.run1000Raw = Math.max(0, parseInt(val) || 0);
+
+                            // DSE 成績
+                            if (field === 'dseSitUpsRaw') updated.dseSitUpsRaw = Math.max(0, parseInt(val) || 0);
+                            if (field === 'dsePullUpsRaw') updated.dsePullUpsRaw = Math.max(0, parseInt(val) || 0);
+                            if (field === 'dseRun1609Raw') updated.dseRun1609Raw = Math.max(0, parseInt(val) || 0);
+                            if (field === 'dseSitReachRaw') updated.dseSitReachRaw = Math.max(0, parseInt(val) || 0);
+
+                            if (field === 'height') updated.height = Math.min(250, Math.max(0, Math.round((parseFloat(val) || 0) * 10) / 10));
+                            if (field === 'weight') updated.weight = Math.min(300, Math.max(0, Math.round((parseFloat(val) || 0) * 10) / 10));
+                            if (/^skillPts[1-6]$/.test(field)) updated[field] = Math.min(SKILL_MAX_PER_SLOT, Math.max(0, parseInt(val) || 0));
+                            if (/^skillItem[1-6]$/.test(field)) updated[field] = String(val || '');
+                            return updated;
+                        }
+                        return student;
+                    });
+                    return next;
+                });
+            };
+
+            const studentScores = useMemo(() => {
+                if (!currentStudent) return null;
+                const attendance = currentStudent.attendance;
+                const conduct = CONDUCT_RULES[currentStudent.conductGrade] || 0;
+                
+                // 常規 5 項體能 (每項 20 分，最高 100)
+                const sitUp = calculateSitUpScore(currentStudent.gender, currentStudent.sitUpsRaw, currentStudent.class);
+                const pushUp = calculatePushUpScore(currentStudent.gender, currentStudent.pushUpsRaw || 0, currentStudent.class);
+                const runLaps = calculateRunScore(currentStudent.gender, currentStudent.runLapsRaw, currentStudent.class);
+                const sitReach = calculateSitReachScore(currentStudent.gender, currentStudent.sitReachRaw || 0, currentStudent.class);
+                const run1000 = calculateRun1000Score(currentStudent.gender, currentStudent.run1000Raw || 0, currentStudent.class);
+                
+                // DSE 4 項體能 (每項 5 分，最高 20 分)
+                const dseSitUp = calculateDseSitUpScore(currentStudent.gender, currentStudent.dseSitUpsRaw || 0);
+                const dsePullUp = calculateDsePullUpScore(currentStudent.gender, currentStudent.dsePullUpsRaw || 0);
+                const dseRun1609 = calculateDseRun1609Score(currentStudent.gender, currentStudent.dseRun1609Raw || 0);
+                const dseSitReach = calculateDseSitReachScore(currentStudent.gender, currentStudent.dseSitReachRaw || 0);
+                const dseTotalFitness = dseSitUp + dsePullUp + dseRun1609 + dseSitReach;
+
+                const skill = calcSkillTotal(currentStudent);
+                
+                // 區分常規(100分) 或 DSE(20分) 體能
+                const fitnessTotal = currentStudent.isDsePe ? dseTotalFitness : (sitUp + pushUp + runLaps + sitReach + run1000);
+                
+                // 累加並在 100分 處封頂
+                const rawTotal = attendance + conduct + fitnessTotal + skill;
+                const total100 = Math.min(100, rawTotal);
+                const grade = calculateGrade(total100);
+                
+                return { attendance, conduct, sitUp, pushUp, runLaps, sitReach, run1000, dseSitUp, dsePullUp, dseRun1609, dseSitReach, dseTotalFitness, fitnessTotal, skill, rawTotal, total100, grade };
+            }, [currentStudent, thresholds, sitUpRulesByForm, pushUpRulesByForm, runRulesByForm, sitReachRulesByForm, run1000RulesByForm, dseSitUpRules, dsePullUpRules, dseRun1609Rules, dseSitReachRules]);
+
+            const executeExportCSV = () => {
+                let targetList = students;
+                let exportLabel = "全部學生";
+
+                if (exportScope === "class") {
+                    targetList = students.filter(s => s.class === exportTargetClass);
+                    exportLabel = `${exportTargetClass}班`;
+                } else if (exportScope === "grade") {
+                    targetList = students.filter(s => getFormOfStudent(s.class) === exportTargetGrade);
+                    exportLabel = `中${getFormChineseLabel(exportTargetGrade)}級`;
+                }
+
+                if (targetList.length === 0) {
+                    showToast("❌ 該範圍內無任何學生數據，無法導出", "error");
+                    return;
+                }
+
+                let csvContent = "data:text/csv;charset=utf-8,\uFEFF";
+                csvContent += "班別,學號,姓名,性別,課程分類,出席次數(20),學習態度操守,身高(cm),體重(kg),BMI,SitUp次數,SitUp得分,掌上壓次數,掌上壓得分,九分鐘跑圈數,九分鐘跑得分,坐地前伸cm,坐地前伸得分,一千米秒數,一千米得分,DSE-SitUp次數,DSE-SitUp得分,DSE-引體上升次/秒,DSE-引體得分,DSE-1609米跑秒數,DSE-1609得分,DSE-坐地前伸cm,DSE-坐地得分,專項1項目,專項1分數,專項2項目,專項2分數,專項3項目,專項3分數,專項4項目,專項4分數,專項5項目,專項5分數,專項6項目,專項6分數,技能總分,原始總和,最終總分(100),等級\r\n";
+                
+                targetList.forEach(s => {
+                    const conductScore = CONDUCT_RULES[s.conductGrade] || 0;
+                    const isDse = s.isDsePe || false;
+
+                    const sitUpScore = isDse ? "" : calculateSitUpScore(s.gender, s.sitUpsRaw, s.class);
+                    const pushUpScore = isDse ? "" : calculatePushUpScore(s.gender, s.pushUpsRaw || 0, s.class);
+                    const runScore = isDse ? "" : calculateRunScore(s.gender, s.runLapsRaw, s.class);
+                    const sitReachScore = isDse ? "" : calculateSitReachScore(s.gender, s.sitReachRaw || 0, s.class);
+                    const run1000Score = isDse ? "" : calculateRun1000Score(s.gender, s.run1000Raw || 0, s.class);
+
+                    const dseSitUp = isDse ? calculateDseSitUpScore(s.gender, s.dseSitUpsRaw || 0) : "";
+                    const dsePullUp = isDse ? calculateDsePullUpScore(s.gender, s.dsePullUpsRaw || 0) : "";
+                    const dseRun1609 = isDse ? calculateDseRun1609Score(s.gender, s.dseRun1609Raw || 0) : "";
+                    const dseSitReach = isDse ? calculateDseSitReachScore(s.gender, s.dseSitReachRaw || 0) : "";
+
+                    const skillScore = calcSkillTotal(s);
+                    const skillCells = [1, 2, 3, 4, 5, 6].map(n => `${s['skillItem' + n] || ''},${s['skillPts' + n] || 0}`).join(',');
+                    
+                    const fitnessTotal = isDse ? (Number(dseSitUp) + Number(dsePullUp) + Number(dseRun1609) + Number(dseSitReach)) : (Number(sitUpScore) + Number(pushUpScore) + Number(runScore) + Number(sitReachScore) + Number(run1000Score));
+                    const rawTotal = s.attendance + conductScore + fitnessTotal + skillScore;
+                    const total100 = Math.min(100, rawTotal);
+                    const grade = calculateGrade(total100);
+
+                    csvContent += `${s.class},${s.number},${s.name},${s.gender},${isDse ? 'DSE' : '常規'},${s.attendance},${s.conductGrade}(${conductScore}),${s.height || ""},${s.weight || ""},${calcBMI(s.height, s.weight)},${isDse ? "" : s.sitUpsRaw},${sitUpScore},${isDse ? "" : (s.pushUpsRaw || 0)},${pushUpScore},${isDse ? "" : s.runLapsRaw},${runScore},${isDse ? "" : (s.sitReachRaw || 0)},${sitReachScore},${isDse ? "" : (s.run1000Raw || 0)},${run1000Score},${isDse ? (s.dseSitUpsRaw || 0) : ""},${dseSitUp},${isDse ? (s.dsePullUpsRaw || 0) : ""},${dsePullUp},${isDse ? (s.dseRun1609Raw || 0) : ""},${dseRun1609},${isDse ? (s.dseSitReachRaw || 0) : ""},${dseSitReach},${skillCells},${skillScore},${rawTotal},${total100},${grade}\r\n`;
+                });
+
+                const encodedUri = encodeURI(csvContent);
+                const link = document.createElement("a");
+                link.setAttribute("href", encodedUri);
+                link.setAttribute("download", `體育科評分數據_${exportLabel}_${new Date().toISOString().split('T')[0]}.csv`);
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                setExportModalOpen(false);
+                showToast(`📥 成功導出 [ ${exportLabel} ] 的數據為 CSV 檔案`);
+            };
+
+            const syncToGoogleSheet = async () => {
+                const targetUrl = cloudUrl || DEFAULT_CLOUD_URL;
+                if (!targetUrl || !targetUrl.startsWith('https://script.google.com/')) {
+                    showToast("❌ 同步失敗：請先在常模設置頁面，填寫正確的 Apps Script 網址！", 'error');
+                    return;
+                }
+                setIsSyncing(true);
+                const sentDirty = JSON.parse(JSON.stringify(dirty));
+                // 比對「本機值」與「最近一次從雲端讀到的值」：沒有真正改動的欄位 (包括殘留的舊記錄) 一律不上傳
+                const sameVal = (a, b) => {
+                    const na = (a === undefined || a === null || a === '') ? '' : String(a);
+                    const nb = (b === undefined || b === null || b === '') ? '' : String(b);
+                    if (na === nb) return true;
+                    const fa = parseFloat(na), fb = parseFloat(nb);
+                    if (!isNaN(fa) && !isNaN(fb)) return fa === fb;
+                    return (na === '' && nb === '0') || (na === '0' && nb === '');
+                };
+                const dirtyFieldsOf = (student) => {
+                    let df = Object.keys(dirty[student.id] || {});
+                    const base = baseRef.current[student.id];
+                    if (base) df = df.filter(k => !sameVal(student[k], base[k]));
+                    return df;
+                };
+                try {
+                    const payload = students.map(student => {
+                        const conductScore = CONDUCT_RULES[student.conductGrade] || 0;
+                        const isDse = student.isDsePe || false;
+
+                        const sitUpScore = isDse ? "" : calculateSitUpScore(student.gender, student.sitUpsRaw, student.class);
+                        const pushUpScore = isDse ? "" : calculatePushUpScore(student.gender, student.pushUpsRaw || 0, student.class);
+                        const runScore = isDse ? "" : calculateRunScore(student.gender, student.runLapsRaw, student.class);
+                        const sitReachScore = isDse ? "" : calculateSitReachScore(student.gender, student.sitReachRaw || 0, student.class);
+                        const run1000Score = isDse ? "" : calculateRun1000Score(student.gender, student.run1000Raw || 0, student.class);
+
+                        const dseSitUp = isDse ? calculateDseSitUpScore(student.gender, student.dseSitUpsRaw || 0) : "";
+                        const dsePullUp = isDse ? calculateDsePullUpScore(student.gender, student.dsePullUpsRaw || 0) : "";
+                        const dseRun1609 = isDse ? calculateDseRun1609Score(student.gender, student.dseRun1609Raw || 0) : "";
+                        const dseSitReach = isDse ? calculateDseSitReachScore(student.gender, student.dseSitReachRaw || 0) : "";
+
+                        const skillScore = calcSkillTotal(student);
+                        
+                        const realFitnessTotal = isDse ? (Number(dseSitUp) + Number(dsePullUp) + Number(dseRun1609) + Number(dseSitReach)) : (Number(sitUpScore) + Number(pushUpScore) + Number(runScore) + Number(sitReachScore) + Number(run1000Score));
+                        const rawTotal = student.attendance + conductScore + realFitnessTotal + skillScore;
+                        const totalScore = Math.min(100, rawTotal); 
+                        const grade = calculateGrade(totalScore);
+                        const skillPayload = {};
+                        for (let n = 1; n <= SKILL_SLOTS; n++) {
+                            skillPayload['skillItem' + n] = student['skillItem' + n] || '';
+                            skillPayload['skillPts' + n] = parseInt(student['skillPts' + n]) || 0;
+                        }
+
+                        return {
+                            id: student.id,
+                            dirtyFields: dirtyFieldsOf(student),
+                            class: student.class,
+                            number: student.number,
+                            name: student.name,
+                            gender: student.gender,
+                            isDsePe: isDse,
+                            attendance: student.attendance,
+                            conductGrade: student.conductGrade,
+                            conductScore: conductScore,
+                            height: student.height || "", weight: student.weight || "",
+                            sitUpsRaw: isDse ? "" : student.sitUpsRaw,
+                            sitUpScore: sitUpScore,
+                            pushUpsRaw: isDse ? "" : (student.pushUpsRaw || 0),
+                            pushUpScore: pushUpScore,
+                            runLapsRaw: isDse ? "" : student.runLapsRaw,
+                            runScore: runScore,
+                            sitReachRaw: isDse ? "" : (student.sitReachRaw || 0),
+                            sitReachScore: sitReachScore,
+                            run1000Raw: isDse ? "" : (student.run1000Raw || 0),
+                            run1000Score: run1000Score,
+                            // DSE
+                            dseSitUpsRaw: isDse ? (student.dseSitUpsRaw || 0) : "",
+                            dseSitUpScore: dseSitUp,
+                            dsePullUpsRaw: isDse ? (student.dsePullUpsRaw || 0) : "",
+                            dsePullUpScore: dsePullUp,
+                            dseRun1609Raw: isDse ? (student.dseRun1609Raw || 0) : "",
+                            dseRun1609Score: dseRun1609,
+                            dseSitReachRaw: isDse ? (student.dseSitReachRaw || 0) : "",
+                            dseSitReachScore: dseSitReach,
+                            ...skillPayload,
+                            skillScore: skillScore,
+                            totalScore: totalScore,
+                            grade: grade
+                        };
+                    });
+
+                    // 同步常規與 DSE 5分制常模，徹底清除25分數據
+                    const configPayload = {
+                        thresholds,
+                        sitUpRules: sitUpRulesByForm,
+                        pushUpRules: pushUpRulesByForm,
+                        runRules: runRulesByForm,
+                        sitReachRules: sitReachRulesByForm,
+                        run1000Rules: run1000RulesByForm,
+                        dseSitUpRules,
+                        dsePullUpRules,
+                        dseRun1609Rules,
+                        dseSitReachRules
+                    };
+
+                    const response = await fetch(targetUrl, {
+                        method: 'POST',
+                        mode: 'cors',
+                        redirect: 'follow', 
+                        body: JSON.stringify({ 
+                            action: 'sync', 
+                            data: payload,
+                            config: configPayload 
+                        })
+                    });
+
+                    if (!response.ok) throw new Error(`伺服器錯誤: ${response.status}`);
+                    const result = await response.json();
+                    if (result.status === 'success') {
+                        setHasUnsavedConfig(false);
+                        setCloudConnectionStatus("success");
+                        setDirty(prev => {
+                            const n = { ...prev };
+                            Object.keys(sentDirty).forEach(id => {
+                                const rem = { ...(n[id] || {}) };
+                                Object.keys(sentDirty[id]).forEach(k => { delete rem[k]; });
+                                if (Object.keys(rem).length) n[id] = rem; else delete n[id];
+                            });
+                            return n;
+                        });
+                        const uploadFieldCount = payload.reduce((a, p) => a + (p.dirtyFields ? p.dirtyFields.length : 0), 0);
+                        showToast(`☁️ 同步成功！本次只上傳你修改過的 ${uploadFieldCount} 個欄位 (更新 ${result.count !== undefined ? result.count : '-'} 位學生)，其他資料保持雲端內容。`);
+                        // 同步成功後自動讀回雲端，讓畫面立即顯示其他老師已輸入的成績 (本機未同步的輸入不會被覆蓋)
+                        await loadDataFromCloud({ silent: true });
+                    } else {
+                        throw new Error(result.message || 'Apps Script 處理異常');
+                    }
+                } catch (error) {
+                    console.error("同步失敗資訊：", error);
+                    setCloudConnectionStatus("failed");
+                    showToast(`❌ 同步失敗，請確認常模頁面中的 Apps Script 是否部署為最新版本並設定權限。`, 'error');
+                } finally {
+                    setIsSyncing(false);
+                }
+            };
+
+            const mapHeader = (header) => {
+                const h = String(header || "").trim();
+                if (h.includes("身高") || h.includes("Height")) return "height";
+                if (h.includes("體重") || h.includes("Weight")) return "weight";
+                if (h.includes("班") || h.includes("Class")) return "class";
+                if (h.includes("號") || h.includes("No")) return "number";
+                if (h.includes("名") || h.includes("Name")) return "name";
+                if (h.includes("性") || h.includes("Gender")) return "gender";
+                if (h.includes("DSE") || h.includes("選修")) return "isDsePe";
+                if (h.includes("出") || h.includes("Attendance")) return "attendance";
+                if (h.includes("態") || h.includes("操") || h.includes("Conduct") || h.includes("學習")) return "conductGrade";
+                if (h.includes("仰臥") || h.includes("SitUp") || h.includes("Sit-up")) return "sitUpsRaw";
+                if (h.includes("掌上壓") || h.includes("Push")) return "pushUpsRaw";
+                if (h.includes("九分鐘") || h.includes("耐力") || h.includes("Run")) return "runLapsRaw";
+                if (h.includes("前伸") || h.includes("SitReach") || h.includes("坐地")) return "sitReachRaw";
+                if (h.includes("一千") || h.includes("1000m") || h.includes("千米")) return "run1000Raw";
+                
+                // DSE 
+                if (h.includes("DSE仰臥") || h.includes("DseSitUp")) return "dseSitUpsRaw";
+                if (h.includes("DSE引體") || h.includes("DsePull")) return "dsePullUpsRaw";
+                if (h.includes("DSE1609") || h.includes("Dse1609")) return "dseRun1609Raw";
+                if (h.includes("DSE坐地") || h.includes("DseSitReach")) return "dseSitReachRaw";
+                if (h.includes("籃") || h.includes("Basket")) return "basketball";
+                if (h.includes("舞") || h.includes("Dance")) return "dance";
+                if (h.includes("其他") || h.includes("Extra")) return "extraSkill";
+                return null;
+            };
+
+            const handleExcelImport = (evt) => {
+                const file = evt.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = e.target.result;
+                        const workbook = XLSX.read(data, { type: 'binary' });
+                        const firstSheetName = workbook.SheetNames[0];
+                        const worksheet = workbook.Sheets[firstSheetName];
+                        const json = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+                        if (json.length < 2) {
+                            setImportError("Excel 檔案內容不足。");
+                            setPreviewStudents([]);
+                            setImportModalOpen(true);
+                            return;
+                        }
+
+                        const headers = json[0].map(h => String(h || ""));
+                        const rows = json.slice(1);
+
+                        const colIndices = {};
+                        headers.forEach((header, index) => {
+                            const field = mapHeader(header);
+                            if (field) colIndices[field] = index;
+                        });
+
+                        importColsRef.current = { ...colIndices };
+                        if (colIndices.name === undefined) {
+                            setImportError("找不到『姓名』欄位，請確認首行標題。");
+                            setPreviewStudents([]);
+                            setImportModalOpen(true);
+                            return;
+                        }
+
+                        const parsedStudents = [];
+                        rows.forEach((row, idx) => {
+                            if (!row || row.length === 0 || !row[colIndices.name]) return;
+                            const studentName = String(row[colIndices.name] || "").trim();
+                            if (!studentName) return;
+
+                            const genderRaw = colIndices.gender !== undefined ? String(row[colIndices.gender] || "").trim().toUpperCase() : "M";
+                            const gender = (genderRaw.includes("F") || genderRaw.includes("女")) ? "F" : "M";
+
+                            const isDseRaw = colIndices.isDsePe !== undefined ? String(row[colIndices.isDsePe] || "").trim().toUpperCase() : "";
+                            const isDsePe = isDseRaw.includes("DSE") || isDseRaw.includes("是") || isDseRaw.includes("TRUE") || isDseRaw.includes("1");
+
+                            const classVal = colIndices.class !== undefined ? String(row[colIndices.class] || "").trim().toUpperCase() : "2A";
+                            const numberVal = colIndices.number !== undefined ? String(row[colIndices.number] || "").trim() : String(idx + 1);
+                            const attendanceVal = colIndices.attendance !== undefined ? parseInt(row[colIndices.attendance]) : 20;
+
+                            let conductRaw = colIndices.conductGrade !== undefined ? String(row[colIndices.conductGrade] || "").trim() : "B";
+                            const conductMatch = conductRaw.match(/([A-DFa-df][+-]?)/);
+                            const conductGrade = conductMatch ? conductMatch[1].toUpperCase() : "B";
+
+                            const sitUpsRaw = colIndices.sitUpsRaw !== undefined ? parseInt(row[colIndices.sitUpsRaw]) || 0 : 0;
+                            const pushUpsRaw = colIndices.pushUpsRaw !== undefined ? parseInt(row[colIndices.pushUpsRaw]) || 0 : 0;
+                            const runLapsRaw = colIndices.runLapsRaw !== undefined ? parseInt(row[colIndices.runLapsRaw]) || 0 : 0;
+                            const sitReachRaw = colIndices.sitReachRaw !== undefined ? parseInt(row[colIndices.sitReachRaw]) || 0 : 0;
+                            const run1000Raw = colIndices.run1000Raw !== undefined ? parseInt(row[colIndices.run1000Raw]) || 0 : 0;
+                            
+                            // DSE
+                            const dseSitUpsRaw = colIndices.dseSitUpsRaw !== undefined ? parseInt(row[colIndices.dseSitUpsRaw]) || 0 : 0;
+                            const dsePullUpsRaw = colIndices.dsePullUpsRaw !== undefined ? parseInt(row[colIndices.dsePullUpsRaw]) || 0 : 0;
+                            const dseRun1609Raw = colIndices.dseRun1609Raw !== undefined ? parseInt(row[colIndices.dseRun1609Raw]) || 0 : 0;
+                            const dseSitReachRaw = colIndices.dseSitReachRaw !== undefined ? parseInt(row[colIndices.dseSitReachRaw]) || 0 : 0;
+
+                            const basketball = colIndices.basketball !== undefined ? parseInt(row[colIndices.basketball]) || 0 : 0;
+                            const dance = colIndices.dance !== undefined ? parseInt(row[colIndices.dance]) || 0 : 0;
+                            const extraSkill = colIndices.extraSkill !== undefined ? parseInt(row[colIndices.extraSkill]) || 0 : 0;
+                            const height = colIndices.height !== undefined ? parseFloat(row[colIndices.height]) || 0 : 0;
+                            const weight = colIndices.weight !== undefined ? parseFloat(row[colIndices.weight]) || 0 : 0;
+
+                            parsedStudents.push(normalizeStudent({
+                                id: Date.now() + idx, class: classVal, number: numberVal, name: studentName, gender: gender, isDsePe: isDsePe,
+                                attendance: Math.min(20, Math.max(0, isNaN(attendanceVal) ? 20 : attendanceVal)),
+                                conductGrade: CONDUCT_RULES[conductGrade] !== undefined ? conductGrade : "B",
+                                sitUpsRaw: Math.max(0, isNaN(sitUpsRaw) ? 0 : sitUpsRaw),
+                                pushUpsRaw: Math.max(0, isNaN(pushUpsRaw) ? 0 : pushUpsRaw),
+                                runLapsRaw: Math.max(0, isNaN(runLapsRaw) ? 0 : runLapsRaw),
+                                sitReachRaw: Math.max(0, isNaN(sitReachRaw) ? 0 : sitReachRaw),
+                                run1000Raw: Math.max(0, isNaN(run1000Raw) ? 0 : run1000Raw), 
+                                // DSE
+                                dseSitUpsRaw: Math.max(0, isNaN(dseSitUpsRaw) ? 0 : dseSitUpsRaw),
+                                dsePullUpsRaw: Math.max(0, isNaN(dsePullUpsRaw) ? 0 : dsePullUpsRaw),
+                                dseRun1609Raw: Math.max(0, isNaN(dseRun1609Raw) ? 0 : dseRun1609Raw), 
+                                dseSitReachRaw: Math.max(0, isNaN(dseSitReachRaw) ? 0 : dseSitReachRaw),
+
+                                basketball: Math.min(9, Math.max(0, isNaN(basketball) ? 0 : basketball)),
+                                dance: Math.min(11, Math.max(0, isNaN(dance) ? 0 : dance)),
+                                extraSkill: Math.min(20, Math.max(0, isNaN(extraSkill) ? 0 : extraSkill)),
+                                height: height,
+                                weight: weight
+                            }));
+                        });
+
+                        if (parsedStudents.length === 0) {
+                            setImportError("沒有成功解析到任何學生資料。");
+                            setPreviewStudents([]);
+                        } else {
+                            setImportError("");
+                            setPreviewStudents(parsedStudents);
+                        }
+                        setImportModalOpen(true);
+                    } catch (err) {
+                        setImportError("讀取檔案出錯，請檢查格式是否正確。");
+                        setPreviewStudents([]);
+                        setImportModalOpen(true);
+                    }
+                };
+                reader.readAsBinaryString(file);
+                evt.target.value = null; 
+            };
+
+            // 匯入時只標記「Excel 有這一欄、而且有填數值」的欄位為已修改，空白或 0 不會覆蓋雲端上別人輸入的成績
+            const getImportDirty = (s) => {
+                const cols = importColsRef.current || {};
+                const d = { name: true };
+                ['class', 'number', 'gender', 'isDsePe'].forEach(k => { if (cols[k] !== undefined) d[k] = true; });
+                ['attendance', 'sitUpsRaw', 'pushUpsRaw', 'runLapsRaw', 'sitReachRaw', 'run1000Raw', 'dseSitUpsRaw', 'dsePullUpsRaw', 'dseRun1609Raw', 'dseSitReachRaw', 'height', 'weight'].forEach(k => {
+                    if (cols[k] !== undefined && (parseFloat(s[k]) || 0) > 0) d[k] = true;
+                });
+                if (cols.conductGrade !== undefined && s.conductGrade) d.conductGrade = true;
+                [['basketball', 1], ['dance', 2], ['extraSkill', 3]].forEach(([k, n]) => {
+                    if (cols[k] !== undefined && (parseInt(s['skillPts' + n]) || 0) > 0) { d['skillPts' + n] = true; d['skillItem' + n] = true; }
+                });
+                return d;
+            };
+
+            const confirmImport = () => {
+                if (previewStudents.length > 0) {
+                    setStudents(previewStudents);
+                    setDirty(prev => { const n = { ...prev }; previewStudents.forEach(s => { n[s.id] = getImportDirty(s); }); return n; });
+                    setCurrentMobileIndex(0);
+                    setCurrentPage(1);
+                    showToast(`✅ 成功導入 ${previewStudents.length} 筆學生資料！`);
+                }
+                setImportModalOpen(false);
+                setPreviewStudents([]);
+            };
+
+            const handleAddStudent = (evt) => {
+                evt.preventDefault();
+                if (!newStudent.name || !newStudent.number) {
+                    alert("請填寫姓名與學號！");
+                    return;
+                }
+                const created = {
+                    ...newStudent,
+                    id: Date.now(),
+                    class: String(newStudent.class).toUpperCase().trim()
+                };
+                const updatedList = [...students, created];
+                setDirty(prev => ({ ...prev, [created.id]: { class: true, number: true, name: true, gender: true, isDsePe: true, attendance: true, conductGrade: true } }));
+                setStudents(updatedList);
+                setAddModalOpen(false);
+                setNewStudent({ class: "2A", number: "", name: "", gender: "M", isDsePe: false, attendance: 0, conductGrade: "B", sitUpsRaw: 0, pushUpsRaw: 0, runLapsRaw: 0, sitReachRaw: 0, run1000Raw: 0, dseSitUpsRaw: 0, dsePullUpsRaw: 0, dseRun1609Raw: 0, dseSitReachRaw: 0, ...EMPTY_SKILLS });
+                showToast(`➕ 已新增學生：${created.name}`);
+            };
+
+            const handleDeleteStudent = (id, name) => {
+                setConfirmModal({
+                    message: `確定要刪除學生「${name}」嗎？此操作無法還原。`,
+                    action: () => {
+                        const updated = students.filter(s => s.id !== id);
+                        setStudents(updated);
+                        showToast(`🗑️ 已刪除學生：${name}`, 'error');
+                        setConfirmModal(null);
+                    }
+                });
+            };
+
+            const handleResetDefault = () => {
+                setConfirmModal({
+                    message: "確定要重設為系統預設的常規及 DSE 成績與常模基準線嗎？目前的修改將會被覆蓋。",
+                    action: () => {
+                        setStudents(DEFAULT_STUDENTS);
+                        setSitUpRulesByForm(DEFAULT_SIT_UP_RULES_BY_FORM);
+                        setPushUpRulesByForm(DEFAULT_PUSH_UP_RULES_BY_FORM);
+                        setRunRulesByForm(DEFAULT_RUN_RULES_BY_FORM);
+                        setSitReachRulesByForm(DEFAULT_SIT_REACH_RULES_BY_FORM);
+                        setRun1000RulesByForm(DEFAULT_RUN_1000_RULES_BY_FORM);
+                        setDseSitUpRules(DEFAULT_DSE_SITUP_RULES);
+                        setDsePullUpRules(DEFAULT_DSE_PULLUP_RULES);
+                        setDseRun1609Rules(DEFAULT_DSE_RUN1609_RULES);
+                        setDseSitReachRules(DEFAULT_DSE_SIT_REACH_RULES);
+                        setThresholds({ A: 89.5, B: 79.5, C: 69.5, D: 59.5, E: 49.5 });
+                        setTempThresholds({ A: 89.5, B: 79.5, C: 69.5, D: 59.5, E: 49.5 });
+                        setCurrentMobileIndex(0);
+                        setCurrentPage(1);
+                        showToast("🔄 已恢復至系統預設值（常規 & DSE 雙模五分制）");
+                        setConfirmModal(null);
+                    }
+                });
+            };
+
+            const updateSitUpRule = (gender, index, field, value) => {
+                const val = parseInt(value) || 0;
+                setSitUpRulesByForm(prev => {
+                    const next = { ...prev };
+                    const formRules = { ...next[editingSitUpForm] };
+                    const genderRules = [...formRules[gender]];
+                    genderRules[index] = { ...genderRules[index], [field]: val };
+                    formRules[gender] = genderRules;
+                    next[editingSitUpForm] = formRules;
+                    return next;
+                });
+                setHasUnsavedConfig(true);
+            };
+
+            const updatePushUpRule = (gender, index, field, value) => {
+                const val = parseInt(value) || 0;
+                setPushUpRulesByForm(prev => {
+                    const next = { ...prev };
+                    const formRules = { ...next[editingPushUpForm] };
+                    const genderRules = [...formRules[gender]];
+                    genderRules[index] = { ...genderRules[index], [field]: val };
+                    formRules[gender] = genderRules;
+                    next[editingPushUpForm] = formRules;
+                    return next;
+                });
+                setHasUnsavedConfig(true);
+            };
+
+            const updateRunRule = (gender, index, field, value) => {
+                const val = parseInt(value) || 0;
+                setRunRulesByForm(prev => {
+                    const next = { ...prev };
+                    const formRules = { ...next[editingRunForm] };
+                    const genderRules = [...formRules[gender]];
+                    genderRules[index] = { ...genderRules[index], [field]: val };
+                    formRules[gender] = genderRules;
+                    next[editingRunForm] = formRules;
+                    return next;
+                });
+                setHasUnsavedConfig(true);
+            };
+
+            const updateSitReachRule = (gender, index, field, value) => {
+                const val = parseInt(value) || 0;
+                setSitReachRulesByForm(prev => {
+                    const next = { ...prev };
+                    const formRules = { ...next[editingSitReachForm] };
+                    const genderRules = [...formRules[gender]];
+                    genderRules[index] = { ...genderRules[index], [field]: val };
+                    formRules[gender] = genderRules;
+                    next[editingSitReachForm] = formRules;
+                    return next;
+                });
+                setHasUnsavedConfig(true);
+            };
+
+            const updateRun1000Rule = (gender, index, field, value) => {
+                const val = parseInt(value) || 0;
+                setRun1000RulesByForm(prev => {
+                    const next = { ...prev };
+                    const formRules = { ...next[editingRun1000Form] };
+                    const genderRules = [...formRules[gender]];
+                    genderRules[index] = { ...genderRules[index], [field]: val };
+                    formRules[gender] = genderRules;
+                    next[editingRun1000Form] = formRules;
+                    return next;
+                });
+                setHasUnsavedConfig(true);
+            };
+
+            const updateDseRule = (target, gender, index, value) => {
+                const val = parseInt(value) || 0;
+                const setterMap = {
+                    situp: setDseSitUpRules,
+                    pullup: setDsePullUpRules,
+                    run1609: setDseRun1609Rules,
+                    sitreach: setDseSitReachRules
+                };
+                const setter = setterMap[target];
+                if (setter) {
+                    setter(prev => {
+                        const next = { ...prev };
+                        const genderRules = [...next[gender]];
+                        genderRules[index] = { ...genderRules[index], req: val };
+                        next[gender] = genderRules;
+                        return next;
+                    });
+                    setHasUnsavedConfig(true);
+                }
+            };
+
+            const saveThresholds = () => {
+                setThresholds({ ...tempThresholds });
+                setHasUnsavedConfig(true);
+                showToast("⚙️ 等級分界線暫存成功！請記得點擊「同步雲端 Sheet」進行備份。");
+            };
+
+            if (!isAuthenticated) {
+                return e('div', { className: "min-h-screen flex flex-col justify-center items-center bg-gradient-to-br from-emerald-50 via-white to-green-100 px-4 text-slate-800" },
+                    e('div', { className: "max-w-md w-full bg-white/95 backdrop-blur-md rounded-3xl shadow-xl p-8 border border-emerald-100/50 text-center" },
+                        e('div', { className: "w-16 h-16 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-lg shadow-emerald-500/20" },
+                            e(Icon, { name: "shield-check", className: "w-8 h-8 text-white" })
+                        ),
+                        e('h2', { className: "text-2xl font-black tracking-wide mb-1 text-slate-800" }, "譚李麗芬紀念中學"),
+                        e('p', { className: "text-xs text-slate-500 mb-6 font-semibold tracking-wider" }, "體育科登分系統 - 獨立安全鎖"),
+                        
+                        e('form', { onSubmit: (evt) => { evt.preventDefault(); handleLoginAttempt(passwordInput); }, className: "space-y-4" },
+                            e('div', { className: "relative" },
+                                e('input', { 
+                                    type: showPassword ? "text" : "password", 
+                                    value: passwordInput, readOnly: true, placeholder: "請使用鍵盤或點擊下方輸入密碼", 
+                                    className: "w-full tracking-widest text-center text-2xl bg-slate-50 border border-emerald-100 rounded-xl px-4 py-3 focus:outline-none focus:border-emerald-500 font-bold transition-all placeholder:text-xs placeholder:tracking-normal placeholder:text-slate-400" 
+                                }),
+                                e('button', { type: "button", onClick: () => setShowPassword(!showPassword), className: "absolute right-3 top-3.5 text-slate-400 hover:text-slate-600" },
+                                    e(Icon, { name: showPassword ? "eye-off" : "eye", className: "w-4 h-4" })
+                                )
+                            ),
+                            authError && e('div', { className: "text-xs font-semibold text-rose-500 bg-rose-50 border border-rose-100 py-2 rounded-lg" }, `⚠️ ${authError}`),
+                            
+                            e('div', { className: "grid grid-cols-3 gap-2.5 pt-2" },
+                                [1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => 
+                                    e('button', { key: num, type: "button", onClick: () => { setAuthError(''); setPasswordInput(prev => prev + num); }, className: "bg-white hover:bg-emerald-50 active:scale-95 font-bold text-lg py-3 rounded-xl transition-all border border-emerald-100 hover:border-emerald-300 text-slate-700" }, num)
+                                ),
+                                e('button', { type: "button", onClick: () => setPasswordInput(''), className: "bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs py-3 rounded-xl transition-all border border-rose-100" }, "C"),
+                                e('button', { type: "button", onClick: () => { setAuthError(''); setPasswordInput(prev => prev + '0'); }, className: "bg-white hover:bg-emerald-50 active:scale-95 font-bold text-lg py-3 rounded-xl transition-all border border-emerald-100 text-slate-700" }, "0"),
+                                e('button', { type: "button", onClick: () => setPasswordInput(prev => prev.slice(0, -1)), className: "bg-slate-100 hover:bg-slate-200 flex items-center justify-center py-3 rounded-xl transition-all border border-slate-200 text-slate-600" },
+                                    e(Icon, { name: "delete", className: "w-5 h-5" })
+                                )
+                            ),
+                            e('button', { type: "submit", className: "w-full mt-4 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 font-bold text-sm py-3.5 rounded-xl shadow-md shadow-emerald-600/10 transition-all flex items-center justify-center gap-2 text-white" },
+                                e(Icon, { name: "log-in", className: "w-4 h-4" }), " 安全登入 (支援實體鍵盤)"
+                            )
+                        )
+                    )
+                );
+            }
+
+            return e('div', { className: "min-h-screen flex flex-col bg-slate-50" },
+                // 吐司提示
+                e('div', { id: "pe-toast", style: { display: 'none' } }),
+                
+                // 確認對話盒
+                confirmModal && e('div', { className: "fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4" },
+                    e('div', { className: "bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-100" },
+                        e('h4', { className: "text-base font-bold text-slate-900 mb-2" }, "確認執行操作？"),
+                        e('p', { className: "text-xs text-slate-600 mb-5 leading-relaxed" }, confirmModal.message),
+                        e('div', { className: "flex gap-2.5 justify-end" },
+                            e('button', { onClick: () => setConfirmModal(null), className: "px-3.5 py-1.5 text-xs font-semibold text-slate-500 hover:bg-slate-100 rounded-lg transition-all" }, "取消"),
+                            e('button', { onClick: confirmModal.action, className: "px-3.5 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 rounded-lg shadow-sm transition-all" }, "確認")
+                        )
+                    )
+                ),
+
+                // 標題導航欄 (綠底白字)
+                e('header', { className: "bg-emerald-800 border-b border-emerald-900 sticky top-0 z-30 shadow-md text-white overflow-hidden" },
+                    e('div', { className: "max-w-7xl mx-auto px-4 py-3 flex flex-col xl:flex-row items-center justify-between gap-4" },
+                        e('div', { className: "flex items-center gap-3 w-full xl:w-auto overflow-hidden shrink-0" },
+                            e('div', { className: "w-11 h-11 bg-gradient-to-tr from-amber-400 via-yellow-300 to-amber-500 rounded-xl flex items-center justify-center shadow-md shrink-0 border border-amber-200" },
+                                e('svg', { className: "w-6 h-6 text-emerald-950", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.5" },
+                                    e('path', { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z", strokeLinecap: "round", strokeLinejoin: "round" }),
+                                    e('circle', { cx: "12", cy: "11", r: "3" }),
+                                    e('path', { d: "M12 5v3M12 14v4" })
+                                )
+                            ),
+                            e('div', { className: "min-w-0" },
+                                e('h1', { className: "text-sm sm:text-base md:text-lg font-bold tracking-wider text-white whitespace-nowrap truncate max-w-full" }, "中華基督會譚李麗芬紀念中學體育科登分系統"),
+                                e('p', { className: "text-[10px] font-bold text-emerald-200 tracking-wider truncate max-w-full uppercase" }, "體育科核心測評管理系統 v17 - 常規與DSE體能雙模隔離儲存版")
+                            )
+                        ),
+                        e('div', { className: "flex flex-wrap items-center gap-2 w-full xl:w-auto justify-end text-xs" },
+                            e('button', { onClick: syncToGoogleSheet, disabled: isSyncing, className: "flex items-center gap-1 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 disabled:bg-emerald-800 text-white font-bold rounded-lg transition-all shrink-0 shadow-sm border border-emerald-600" },
+                                e(Icon, { name: isSyncing ? "refresh-cw" : "cloud", className: `w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}` }), isSyncing ? "同步中..." : "同步雲端 Sheet"
+                            ),
+                            e('button', { onClick: loadDataFromCloud, disabled: isCloudLoading, className: "flex items-center gap-1 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 disabled:bg-emerald-800 text-white font-bold rounded-lg transition-all shrink-0 shadow-sm border border-emerald-600" },
+                                e(Icon, { name: "refresh-cw", className: `w-3.5 h-3.5 ${isCloudLoading ? 'animate-spin' : ''}` }), isCloudLoading ? "載入中..." : "讀取雲端 Sheet"
+                            ),
+                            e('label', { className: "cursor-pointer flex items-center gap-1 px-2.5 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white font-bold rounded-lg transition-all shrink-0" },
+                                e(Icon, { name: "upload-cloud", className: "w-3.5 h-3.5" }), " 匯入 Excel",
+                                e('input', { type: "file", accept: ".xlsx, .xls, .csv", onChange: handleExcelImport, className: "hidden" })
+                            ),
+                            e('button', { onClick: () => setExportModalOpen(true), className: "flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-emerald-50 text-emerald-800 font-bold rounded-lg transition-all shrink-0" },
+                                e(Icon, { name: "download", className: "w-3.5 h-3.5" }), " 導出 CSV"
+                            ),
+                            e('button', { onClick: () => setAddModalOpen(true), className: "flex items-center gap-1 px-2.5 py-1.5 bg-green-500 hover:bg-green-400 text-white font-bold rounded-lg transition-all shadow-sm shrink-0" },
+                                e(Icon, { name: "user-plus", className: "w-3.5 h-3.5" }), " 新增學生"
+                            ),
+                            e('button', { onClick: () => { setIsAuthenticated(false); safeSessionStorage.setItem('pe_app_authenticated', 'false'); }, className: "p-1.5 bg-emerald-900 hover:bg-emerald-700 text-white rounded-lg transition-all shrink-0", title: "登出鎖定" },
+                                e(Icon, { name: "lock", className: "w-4 h-4" })
+                            )
+                        )
+                    )
+                ),
+
+                e('div', { className: "bg-white border-b border-slate-200 shadow-sm" },
+                    e('div', { className: "max-w-7xl mx-auto px-4 py-2 flex flex-col md:flex-row items-center justify-between gap-3" },
+                        e('div', { className: "flex p-0.5 bg-slate-100 rounded-lg w-full md:w-auto" },
+                            e('button', { onClick: () => setActiveTab('mobile'), className: `flex-1 md:flex-none flex items-center justify-center gap-1 px-3 py-1.5 text-xs font-bold rounded-md transition-all ${activeTab === 'mobile' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}` }, e(Icon, { name: "tablet", className: "w-3.5 h-3.5" }), " 行動速錄模式"),
+                            e('button', { onClick: () => { setActiveTab('pc'); setCurrentPage(1); }, className: `flex-1 md:flex-none flex items-center justify-center gap-1 px-3 py-1.5 text-xs font-bold rounded-md transition-all ${activeTab === 'pc' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}` }, e(Icon, { name: "layout-grid", className: "w-3.5 h-3.5" }), " 總表工作台"),
+                            e('button', { onClick: () => setActiveTab('settings'), className: `flex-1 md:flex-none flex items-center justify-center gap-1 px-3 py-1.5 text-xs font-bold rounded-md transition-all ${activeTab === 'settings' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}` }, e(Icon, { name: "settings-2", className: "w-3.5 h-3.5" }), " 評分常模基準")
+                        ),
+                        activeTab !== 'settings' && e('div', { className: "flex items-center gap-2 w-full md:w-auto" },
+                            e('div', { className: "relative flex-1 md:w-40" },
+                                e(Icon, { name: "search", className: "w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" }),
+                                e('input', { type: "text", placeholder: "搜尋學號、姓名...", value: searchQuery, onChange: (evt) => { setSearchQuery(evt.target.value); setCurrentMobileIndex(0); setCurrentPage(1); }, className: "w-full pl-8 pr-2.5 py-1 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-emerald-500 font-medium" })
+                            ),
+                            e('div', { className: "flex items-center gap-1 text-xs" },
+                                e('select', { value: selectedClass, onChange: (evt) => { setSelectedClass(evt.target.value); setCurrentMobileIndex(0); setCurrentPage(1); }, className: "bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 font-bold text-slate-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-500" },
+                                    classesList.map(c => e('option', { key: c, value: c }, c === 'All' ? '全部班別' : `${c} 班`))
+                                )
+                            ),
+                            e('button', { onClick: handleResetDefault, className: "p-1.5 text-slate-400 hover:text-rose-600 rounded-lg", title: "恢復預設資料" }, e(Icon, { name: "rotate-ccw", className: "w-3.5 h-3.5" }))
+                        )
+                    )
+                ),
+
+                e('main', { className: "flex-1 max-w-7xl w-full mx-auto p-4" },
+                    // ⚠️ 常模修改未雲端同步的提醒橫幅
+                    hasUnsavedConfig && e('div', { className: "bg-amber-50 border border-amber-200 text-amber-800 p-3.5 rounded-xl text-xs font-bold mb-4 flex flex-col sm:flex-row items-center justify-between gap-2 shadow-sm animate-pulse" },
+                        e('span', { className: "flex items-center gap-1.5" }, e(Icon, { name: "alert-triangle", className: "w-4 h-4 text-amber-600" }), "⚠️ 您已修改了評分常模或等第線！為避免重新整理 (F5) 後消失，請立即將設定備份到雲端試算表。"),
+                        e('button', { onClick: syncToGoogleSheet, className: "bg-amber-600 hover:bg-amber-500 text-white font-bold px-3.5 py-1.5 rounded-lg transition-all text-[11px] shrink-0 shadow-sm" }, "💾 立即儲存並備份所有設定至雲端")
+                    ),
+
+                    isCloudLoading && e('div', { className: "bg-emerald-50 border border-emerald-200 text-emerald-800 p-3 rounded-xl text-xs font-bold mb-4 flex items-center gap-2 justify-center shadow-sm" },
+                        e(Icon, { name: "refresh-cw", className: "animate-spin w-4 h-4" }), "正在與 Google Sheet 進行常模與學生成績雙向雲端載入..."
+                    ),
+
+                    // ==================== 行動速錄模式 ====================
+                    activeTab === 'mobile' && e('div', { className: "bg-white border border-slate-200 rounded-xl p-4 shadow-sm mb-4" },
+                        e('div', { className: "flex justify-between items-center mb-4 border-b border-slate-100 pb-3" },
+                            e('button', { disabled: currentMobileIndexSafe <= 0, onClick: () => setCurrentMobileIndex(prev => Math.max(0, prev - 1)), className: "flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-30 text-slate-700 text-xs font-bold rounded-lg transition-all" }, e(Icon, { name: "chevron-left", className: "w-3.5 h-3.5" }), " 上一位"),
+                            e('div', { className: "text-center" },
+                                e('span', { className: "text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full inline-block mb-1" }, `目前進度: ${filteredStudents.length > 0 ? currentMobileIndexSafe + 1 : 0} / ${filteredStudents.length}`),
+                                e('h3', { className: "text-base font-bold text-slate-900" }, currentStudent ? `${currentStudent.class} (${currentStudent.number}號) ${currentStudent.name}` : "無相符資料"),
+                                currentStudent && e('button', { 
+                                    onClick: () => updateStudentValue(currentStudent.id, 'isDsePe', !currentStudent.isDsePe),
+                                    className: `mt-1.5 px-3 py-1 text-[10px] font-black rounded-full transition-all ${currentStudent.isDsePe ? 'bg-gradient-to-r from-teal-500 to-emerald-600 text-white shadow-sm' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`
+                                }, currentStudent.isDsePe ? "🎓 DSE 體育選修考生 (點擊轉換為常規生)" : "🏫 普通體育常規生 (點擊轉換為DSE考生)")
+                            ),
+                            e('button', { disabled: currentMobileIndexSafe >= filteredStudents.length - 1, onClick: () => setCurrentMobileIndex(prev => Math.min(filteredStudents.length - 1, prev + 1)), className: "flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-30 text-slate-700 text-xs font-bold rounded-lg transition-all" }, "下一位 ", e(Icon, { name: "chevron-right", className: "w-3.5 h-3.5" }))
+                        ),
+                        currentStudent ? e('div', { className: "grid grid-cols-1 lg:grid-cols-2 gap-4" },
+                            // 左邊控制板
+                            e('div', { className: "space-y-4" },
+                                // 1. 出席與操守
+                                e('div', { className: "bg-green-50/50 rounded-xl p-3 border border-green-100" },
+                                    e('h4', { className: "text-xs font-bold text-emerald-800 uppercase tracking-wider mb-2 flex items-center gap-1" }, e(Icon, { name: "calendar", className: "w-3.5 h-3.5 text-emerald-700" }), " 1. 課堂出席與學習態度 (操守學分)"),
+                                    e('div', { className: "grid grid-cols-2 gap-3" },
+                                        e('div', { className: "bg-white p-2.5 rounded-lg border border-green-100 shadow-sm" },
+                                            e('label', { className: "block text-[10px] font-bold text-slate-400 mb-1" }, "出席次數 (最高 20)"),
+                                            e('div', { className: "flex items-center gap-1.5 justify-center" },
+                                                e('button', { onClick: () => updateStudentValue(currentStudent.id, 'attendance', currentStudent.attendance - 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "-"),
+                                                e('span', { className: "text-xs font-bold w-6 text-center" }, currentStudent.attendance),
+                                                e('button', { onClick: () => updateStudentValue(currentStudent.id, 'attendance', currentStudent.attendance + 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "+")
+                                            )
+                                        ),
+                                        e('div', { className: "bg-white p-2.5 rounded-lg border border-green-100 shadow-sm" },
+                                            e('label', { className: "block text-[10px] font-bold text-slate-400 mb-1" }, "學習態度 (操守學分)"),
+                                            e('select', { value: currentStudent.conductGrade, onChange: (evt) => updateStudentValue(currentStudent.id, 'conductGrade', evt.target.value), className: "w-full bg-slate-100 border border-slate-200 rounded px-1.5 py-1 text-xs font-bold text-slate-700" },
+                                                Object.keys(CONDUCT_RULES).map(g => e('option', { key: g, value: g }, `${g}等 (${CONDUCT_RULES[g]}分)`))
+                                            )
+                                        )
+                                    )
+                                ),
+
+                                // 1.5 身體數據 (身高體重 / 不計分)
+                                e('div', { className: "bg-green-50/50 rounded-xl p-3 border border-green-100" },
+                                    e('h4', { className: "text-xs font-bold text-emerald-800 uppercase tracking-wider mb-2 flex items-center gap-1" }, e(Icon, { name: "ruler", className: "w-3.5 h-3.5 text-emerald-700" }), " 身體數據 (身高 / 體重 / BMI，不計入總分)"),
+                                    e('div', { className: "grid grid-cols-3 gap-3" },
+                                        e('div', { className: "bg-white p-2.5 rounded-lg border border-green-100 shadow-sm" },
+                                            e('label', { className: "block text-[10px] font-bold text-slate-400 mb-1" }, "身高 (cm)"),
+                                            e('input', { type: "number", step: "0.1", min: "0", placeholder: "cm", value: currentStudent.height || "", onChange: (evt) => updateStudentValue(currentStudent.id, 'height', evt.target.value), className: "w-full text-center text-xs font-bold py-0.5 border-b focus:outline-none" })
+                                        ),
+                                        e('div', { className: "bg-white p-2.5 rounded-lg border border-green-100 shadow-sm" },
+                                            e('label', { className: "block text-[10px] font-bold text-slate-400 mb-1" }, "體重 (kg)"),
+                                            e('input', { type: "number", step: "0.1", min: "0", placeholder: "kg", value: currentStudent.weight || "", onChange: (evt) => updateStudentValue(currentStudent.id, 'weight', evt.target.value), className: "w-full text-center text-xs font-bold py-0.5 border-b focus:outline-none" })
+                                        ),
+                                        e('div', { className: "bg-white p-2.5 rounded-lg border border-green-100 shadow-sm text-center" },
+                                            e('label', { className: "block text-[10px] font-bold text-slate-400 mb-1" }, "BMI (自動計算)"),
+                                            e('span', { className: "text-xs font-bold text-emerald-700" }, calcBMI(currentStudent.height, currentStudent.weight) || "-")
+                                        )
+                                    )
+                                ),
+
+                                // 2. 體能測試項目
+                                !currentStudent.isDsePe ? (
+                                    // ==================== 普通體育常規 5 項 ====================
+                                    e('div', { className: "bg-green-50/50 rounded-xl p-3 border border-green-100 animate-fade-in" },
+                                        e('h4', { className: "text-xs font-bold text-emerald-800 uppercase tracking-wider mb-2 flex items-center gap-1" }, e(Icon, { name: "trophy", className: "w-3.5 h-3.5 text-emerald-700" }), " 2. 五項核心體能常模項目 (每項 20 分)"),
+                                        e('div', { className: "grid grid-cols-1 sm:grid-cols-2 gap-3" },
+                                            // 仰臥起坐
+                                            e('div', { className: "bg-white p-2.5 rounded-lg border border-green-100 shadow-sm" },
+                                                e('div', { className: "flex justify-between items-center mb-1" }, e('span', { className: "text-[10px] font-bold text-slate-400" }, "1. 仰臥起坐 (次)"), e('span', { className: "text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded" }, `得分: ${studentScores?.sitUp}分`)),
+                                                e('div', { className: "flex items-center gap-1 justify-center" },
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'sitUpsRaw', currentStudent.sitUpsRaw - 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "-"),
+                                                    e('input', { type: "number", value: currentStudent.sitUpsRaw, onChange: (evt) => updateStudentValue(currentStudent.id, 'sitUpsRaw', evt.target.value), className: "w-12 text-center text-xs font-bold py-0.5 border-b focus:outline-none" }),
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'sitUpsRaw', currentStudent.sitUpsRaw + 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "+")
+                                                )
+                                            ),
+                                            // 掌上壓
+                                            e('div', { className: "bg-white p-2.5 rounded-lg border border-green-100 shadow-sm" },
+                                                e('div', { className: "flex justify-between items-center mb-1" }, e('span', { className: "text-[10px] font-bold text-slate-400" }, "2. 掌上壓 (次)"), e('span', { className: "text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded" }, `得分: ${studentScores?.pushUp}分`)),
+                                                e('div', { className: "flex items-center gap-1 justify-center" },
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'pushUpsRaw', (currentStudent.pushUpsRaw || 0) - 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "-"),
+                                                    e('input', { type: "number", value: currentStudent.pushUpsRaw || 0, onChange: (evt) => updateStudentValue(currentStudent.id, 'pushUpsRaw', evt.target.value), className: "w-12 text-center text-xs font-bold py-0.5 border-b focus:outline-none" }),
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'pushUpsRaw', (currentStudent.pushUpsRaw || 0) + 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "+")
+                                                )
+                                            ),
+                                            // 九分鐘跑
+                                            e('div', { className: "bg-white p-2.5 rounded-lg border border-green-100 shadow-sm" },
+                                                e('div', { className: "flex justify-between items-center mb-1" }, e('span', { className: "text-[10px] font-bold text-slate-400" }, "3. 九分鐘跑 (圈)"), e('span', { className: "text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded" }, `得分: ${studentScores?.runLaps}分`)),
+                                                e('div', { className: "flex items-center gap-1 justify-center" },
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'runLapsRaw', currentStudent.runLapsRaw - 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "-"),
+                                                    e('input', { type: "number", value: currentStudent.runLapsRaw, onChange: (evt) => updateStudentValue(currentStudent.id, 'runLapsRaw', evt.target.value), className: "w-12 text-center text-xs font-bold py-0.5 border-b focus:outline-none" }),
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'runLapsRaw', currentStudent.runLapsRaw + 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "+")
+                                                )
+                                            ),
+                                            // 坐地前伸
+                                            e('div', { className: "bg-white p-2.5 rounded-lg border border-green-100 shadow-sm" },
+                                                e('div', { className: "flex justify-between items-center mb-1" }, e('span', { className: "text-[10px] font-bold text-slate-400" }, "4. 坐地前伸 (cm)"), e('span', { className: "text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded" }, `得分: ${studentScores?.sitReach}分`)),
+                                                e('div', { className: "flex items-center gap-1 justify-center" },
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'sitReachRaw', (currentStudent.sitReachRaw || 0) - 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "-"),
+                                                    e('input', { type: "number", value: currentStudent.sitReachRaw || 0, onChange: (evt) => updateStudentValue(currentStudent.id, 'sitReachRaw', evt.target.value), className: "w-12 text-center text-xs font-bold py-0.5 border-b focus:outline-none" }),
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'sitReachRaw', (currentStudent.sitReachRaw || 0) + 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "+")
+                                                )
+                                            ),
+                                            // 一千米跑 (分/秒 手動鍵盤錄入，0 分與秒時完美為空白)
+                                            e('div', { className: "bg-white p-2.5 rounded-lg border border-green-100 shadow-sm col-span-1 sm:col-span-2" },
+                                                e('div', { className: "flex justify-between items-center mb-1" }, e('span', { className: "text-[10px] font-bold text-slate-400" }, "5. 一千米跑 (分/秒)"), e('span', { className: "text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded" }, `得分: ${studentScores?.run1000}分`)),
+                                                e('div', { className: "flex items-center justify-center gap-2" },
+                                                    e('input', { type: "number", placeholder: "分", value: getMinVal(currentStudent.run1000Raw), onChange: (evt) => { const m = Math.max(0, parseInt(evt.target.value) || 0); const s = (currentStudent.run1000Raw || 0) % 60; updateStudentValue(currentStudent.id, 'run1000Raw', m * 60 + s); }, className: "w-10 text-center text-xs font-bold border-b focus:outline-none" }),
+                                                    e('span', { className: "text-[10px] text-slate-400" }, "分"),
+                                                    e('input', { type: "number", placeholder: "秒", max: "59", min: "0", value: getSecVal(currentStudent.run1000Raw), onChange: (evt) => { const m = Math.floor((currentStudent.run1000Raw || 0) / 60); const s = Math.min(59, Math.max(0, parseInt(evt.target.value) || 0)); updateStudentValue(currentStudent.id, 'run1000Raw', m * 60 + s); }, className: "w-10 text-center text-xs font-bold border-b focus:outline-none" }),
+                                                    e('span', { className: "text-[10px] text-slate-400" }, "秒"),
+                                                    e('span', { className: "text-[10px] bg-slate-100 px-2 py-0.5 rounded text-slate-500 font-bold" }, formatTime(currentStudent.run1000Raw))
+                                                )
+                                            )
+                                        )
+                                    )
+                                ) : (
+                                    // ==================== DSE 體育選修 4 項 ====================
+                                    e('div', { className: "bg-teal-50/70 rounded-xl p-3 border border-teal-100 animate-fade-in" },
+                                        e('h4', { className: "text-xs font-bold text-teal-800 uppercase tracking-wider mb-2 flex items-center gap-1" }, e(Icon, { name: "award", className: "w-3.5 h-3.5 text-teal-700" }), " 🎓 香港中學文憑 (DSE體育) 體能項目 (每項最高 5 分，共20分)"),
+                                        e('div', { className: "grid grid-cols-1 sm:grid-cols-2 gap-3" },
+                                            // DSE 1分鐘仰臥起坐
+                                            e('div', { className: "bg-white p-2.5 rounded-lg border border-teal-100 shadow-sm" },
+                                                e('div', { className: "flex justify-between items-center mb-1" }, e('span', { className: "text-[10px] font-bold text-slate-400" }, "DSE 1分鐘仰臥起坐 (次)"), e('span', { className: "text-[10px] font-bold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded" }, `得分: ${studentScores?.dseSitUp} / 5分`)),
+                                                e('div', { className: "flex items-center gap-1 justify-center" },
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'dseSitUpsRaw', (currentStudent.dseSitUpsRaw || 0) - 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "-"),
+                                                    e('input', { type: "number", value: currentStudent.dseSitUpsRaw || 0, onChange: (evt) => updateStudentValue(currentStudent.id, 'dseSitUpsRaw', evt.target.value), className: "w-12 text-center text-xs font-bold py-0.5 border-b focus:outline-none" }),
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'dseSitUpsRaw', (currentStudent.dseSitUpsRaw || 0) + 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "+")
+                                                )
+                                            ),
+                                            // DSE 引體上升 / 屈臂懸垂
+                                            e('div', { className: "bg-white p-2.5 rounded-lg border border-teal-100 shadow-sm" },
+                                                e('div', { className: "flex justify-between items-center mb-1" }, 
+                                                    e('span', { className: "text-[10px] font-bold text-slate-400" }, currentStudent.gender === 'M' ? "DSE 引體上升 (次)" : "DSE 屈臂懸垂 (秒)"), 
+                                                    e('span', { className: "text-[10px] font-bold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded" }, `得分: ${studentScores?.dsePullUp} / 5分`)
+                                                ),
+                                                e('div', { className: "flex items-center gap-1 justify-center" },
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'dsePullUpsRaw', (currentStudent.dsePullUpsRaw || 0) - 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "-"),
+                                                    e('input', { type: "number", value: currentStudent.dsePullUpsRaw || 0, onChange: (evt) => updateStudentValue(currentStudent.id, 'dsePullUpsRaw', evt.target.value), className: "w-12 text-center text-xs font-bold py-0.5 border-b focus:outline-none" }),
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'dsePullUpsRaw', (currentStudent.dsePullUpsRaw || 0) + 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "+")
+                                                )
+                                            ),
+                                            // DSE 坐地體前伸
+                                            e('div', { className: "bg-white p-2.5 rounded-lg border border-teal-100 shadow-sm" },
+                                                e('div', { className: "flex justify-between items-center mb-1" }, e('span', { className: "text-[10px] font-bold text-slate-400" }, "DSE 坐地前伸 (cm)"), e('span', { className: "text-[10px] font-bold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded" }, `得分: ${studentScores?.dseSitReach} / 5分`)),
+                                                e('div', { className: "flex items-center gap-1 justify-center" },
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'dseSitReachRaw', (currentStudent.dseSitReachRaw || 0) - 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "-"),
+                                                    e('input', { type: "number", value: currentStudent.dseSitReachRaw || 0, onChange: (evt) => updateStudentValue(currentStudent.id, 'dseSitReachRaw', evt.target.value), className: "w-12 text-center text-xs font-bold py-0.5 border-b focus:outline-none" }),
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, 'dseSitReachRaw', (currentStudent.dseSitReachRaw || 0) + 1), className: "w-7 h-7 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded font-bold" }, "+")
+                                                )
+                                            ),
+                                            // DSE 1609米跑
+                                            e('div', { className: "bg-white p-2.5 rounded-lg border border-teal-100 shadow-sm col-span-1 sm:col-span-2" },
+                                                e('div', { className: "flex justify-between items-center mb-1" }, e('span', { className: "text-[10px] font-bold text-slate-400" }, "DSE 1609米跑 (分/秒)"), e('span', { className: "text-[10px] font-bold text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded" }, `得分: ${studentScores?.dseRun1609} / 5分`)),
+                                                e('div', { className: "flex items-center justify-center gap-2" },
+                                                    e('input', { type: "number", placeholder: "分", value: getMinVal(currentStudent.dseRun1609Raw), onChange: (evt) => { const m = Math.max(0, parseInt(evt.target.value) || 0); const s = (currentStudent.dseRun1609Raw || 0) % 60; updateStudentValue(currentStudent.id, 'dseRun1609Raw', m * 60 + s); }, className: "w-10 text-center text-xs font-bold border-b focus:outline-none" }),
+                                                    e('span', { className: "text-[10px] text-slate-400" }, "分"),
+                                                    e('input', { type: "number", placeholder: "秒", max: "59", min: "0", value: getSecVal(currentStudent.dseRun1609Raw), onChange: (evt) => { const m = Math.floor((currentStudent.dseRun1609Raw || 0) % 60); const s = Math.min(59, Math.max(0, parseInt(evt.target.value) || 0)); updateStudentValue(currentStudent.id, 'dseRun1609Raw', m * 60 + s); }, className: "w-10 text-center text-xs font-bold border-b focus:outline-none" }),
+                                                    e('span', { className: "text-[10px] text-slate-400" }, "秒"),
+                                                    e('span', { className: "text-[10px] bg-teal-50 px-2 py-0.5 rounded text-teal-600 font-bold" }, formatTime(currentStudent.dseRun1609Raw))
+                                                )
+                                            )
+                                        )
+                                    )
+                                ),
+
+                                // 3. 專項運動技能 (6 格，項目可選)
+                                e('div', { className: "bg-green-50/50 rounded-xl p-3 border border-green-100" },
+                                    e('h4', { className: "text-xs font-bold text-emerald-800 uppercase tracking-wider mb-2 flex items-center gap-1" }, e(Icon, { name: "medal", className: "w-3.5 h-3.5 text-emerald-700" }), ` 3. 專項運動技能評核 (每格最高 ${SKILL_MAX_PER_SLOT} 分，技能總分上限 ${SKILL_TOTAL_CAP})`),
+                                    e('div', { className: "grid grid-cols-2 sm:grid-cols-3 gap-2" },
+                                        [1, 2, 3, 4, 5, 6].map(n => {
+                                            const itemKey = 'skillItem' + n, ptsKey = 'skillPts' + n;
+                                            const curItem = currentStudent[itemKey] || '';
+                                            const curPts = currentStudent[ptsKey] || 0;
+                                            const opts = (curItem && !SKILL_OPTIONS.includes(curItem)) ? [...SKILL_OPTIONS, curItem] : SKILL_OPTIONS;
+                                            return e('div', { key: n, className: "bg-white p-2 rounded-lg border border-green-100 text-center shadow-sm" },
+                                                e('select', { value: curItem, onChange: (evt) => updateStudentValue(currentStudent.id, itemKey, evt.target.value), className: "w-full bg-slate-100 border border-slate-200 rounded px-1 py-0.5 text-[10px] font-bold text-slate-600 mb-1" },
+                                                    e('option', { value: "" }, "選擇項目"),
+                                                    opts.map(o => e('option', { key: o, value: o }, o))
+                                                ),
+                                                e('div', { className: "flex items-center gap-1 justify-center" },
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, ptsKey, curPts - 1), className: "w-5 h-5 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold" }, "-"),
+                                                    e('input', { type: "number", min: "0", max: String(SKILL_MAX_PER_SLOT), value: curPts, onChange: (evt) => updateStudentValue(currentStudent.id, ptsKey, evt.target.value), className: "w-9 text-center text-xs font-bold py-0.5 border-b focus:outline-none" }),
+                                                    e('button', { onClick: () => updateStudentValue(currentStudent.id, ptsKey, curPts + 1), className: "w-5 h-5 flex items-center justify-center bg-slate-100 hover:bg-slate-200 rounded text-xs font-bold" }, "+")
+                                                )
+                                            );
+                                        })
+                                    )
+                                )
+                            ),
+                            
+                            // 右邊結果摘要面版
+                            e('div', { className: "flex flex-col justify-between bg-gradient-to-br from-emerald-900 to-teal-950 rounded-2xl p-5 text-white shadow-lg" },
+                                e('div', null,
+                                    e('div', { className: "flex justify-between items-center mb-3 pb-3 border-b border-white/10" }, 
+                                        e('span', { className: "text-xs font-bold text-emerald-300 tracking-wide" }, currentStudent.isDsePe ? "🎓 DSE體育選修 成績單 (5分項目制)" : "🏫 常規體育 成績單"), 
+                                        e('span', { className: "px-2 py-0.5 bg-white/10 text-white text-[10px] font-bold rounded-full border border-white/20" }, currentStudent.gender === 'M' ? '男學生 (M)' : '女學生 (F)')
+                                    ),
+                                    e('div', { className: "space-y-2 text-xs font-semibold" },
+                                        e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-emerald-200 flex items-center gap-1" }, e(Icon, { name: "calendar", className: "w-3.5 h-3.5 text-emerald-400" }), " 課堂出席次數:"), e('span', { className: "font-bold text-white" }, `${studentScores?.attendance} / 20`)),
+                                        e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-emerald-200 flex items-center gap-1" }, e(Icon, { name: "award", className: "w-3.5 h-3.5 text-emerald-400" }), " 學習態度操守評級:"), e('span', { className: "font-bold text-white" }, `${currentStudent.conductGrade} (${studentScores?.conduct}分)`)),
+                                        
+                                        // 體能指標分佈顯示
+                                        !currentStudent.isDsePe ? (
+                                            e('div', { className: "space-y-2 border-t border-b border-white/10 py-2 my-2" },
+                                                e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-emerald-300 pl-2" }, "1. 仰臥起坐 (常規):"), e('span', null, `${studentScores?.sitUp} / 20`)),
+                                                e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-emerald-300 pl-2" }, "2. 掌上壓 (常規):"), e('span', null, `${studentScores?.pushUp} / 20`)),
+                                                e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-emerald-300 pl-2" }, "3. 九分鐘跑 (常規):"), e('span', null, `${studentScores?.runLaps} / 20`)),
+                                                e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-emerald-300 pl-2" }, "4. 坐地前伸 (常規):"), e('span', null, `${studentScores?.sitReach} / 20`)),
+                                                e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-emerald-300 pl-2" }, "5. 一千米跑 (常規):"), e('span', null, `${studentScores?.run1000} / 20`)),
+                                                e('div', { className: "flex justify-between items-center text-emerald-100 font-bold" }, e('span', null, "體能加總 (最高100分):"), e('span', null, `${studentScores?.fitnessTotal}分`))
+                                            )
+                                        ) : (
+                                            e('div', { className: "space-y-2 border-t border-b border-white/10 py-2 my-2 text-teal-100" },
+                                                e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-teal-300 pl-2" }, "1. DSE 1分鐘仰臥起坐:"), e('span', null, `${studentScores?.dseSitUp} / 5`)),
+                                                e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-teal-300 pl-2" }, currentStudent.gender === 'M' ? "2. DSE 引體上升:" : "2. DSE 屈臂懸垂:"), e('span', null, `${studentScores?.dsePullUp} / 5`)),
+                                                e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-teal-300 pl-2" }, "3. DSE 1609米跑:"), e('span', null, `${studentScores?.dseRun1609} / 5`)),
+                                                e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-teal-300 pl-2" }, "4. DSE 坐地體前伸:"), e('span', null, `${studentScores?.dseSitReach} / 5`)),
+                                                e('div', { className: "flex justify-between items-center text-teal-200 font-bold" }, e('span', null, "DSE體能加總 (最高20分):"), e('span', null, `${studentScores?.dseTotalFitness}分`))
+                                            )
+                                        ),
+                                        e('div', { className: "flex justify-between items-center" }, e('span', { className: "text-emerald-200 flex items-center gap-1" }, e(Icon, { name: "crown", className: "w-3.5 h-3.5 text-emerald-400" }), " 專項運動技能:"), e('span', { className: "font-bold text-white" }, `${studentScores?.skill} / ${SKILL_TOTAL_CAP}`))
+                                    )
+                                ),
+                                e('div', { className: "mt-4 pt-4 border-t border-white/10 flex items-center justify-between" },
+                                    e('div', null, e('span', { className: "text-[9px] text-emerald-200 font-bold block mb-0.5" }, "學期綜合評分 (滿分100分 - 封頂限制)"), e('div', { className: "flex items-baseline gap-1" }, e('span', { className: "text-3xl font-black text-emerald-300 tracking-tight" }, studentScores?.total100), e('span', { className: "text-xs font-semibold text-emerald-100" }, "分"))),
+                                    e('div', { className: "text-center" }, e('span', { className: "text-[9px] text-emerald-200 font-bold block mb-0.5" }, "學科總評等第"), e('span', { className: `inline-block px-4 py-1 rounded-xl text-lg font-black shadow bg-emerald-500 text-white` }, studentScores?.grade))
+                                )
+                            )
+                        ) : e('div', { className: "text-center py-10 text-slate-400 font-medium" }, "無任何學生名單符合目前搜尋標準。")
+                    ),
+
+                    // ==================== 總表工作台 (PC Data Grid - 可手動輸入所有指標) ====================
+                    activeTab === 'pc' && e('div', { className: "bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden mb-4 animate-fade-in" },
+                        e('div', { className: "overflow-x-auto" },
+                            e('table', { className: "w-full text-left border-collapse" },
+                                e('thead', null,
+                                    e('tr', { className: "bg-emerald-50 border-b border-emerald-100 text-[10px] font-bold text-emerald-800 uppercase tracking-wider text-center" },
+                                        e('th', { className: "p-2.5 w-14" }, "班別"), e('th', { className: "p-2.5 w-14" }, "學號"), e('th', { className: "p-2.5 text-left w-24" }, "姓名"), e('th', { className: "p-2.5 w-14" }, "性別"), e('th', { className: "p-2.5 w-20" }, "課程分類"), e('th', { className: "p-2.5 w-16" }, "出席(20)"), e('th', { className: "p-2.5 w-20" }, "學習態度"), e('th', { className: "p-2.5 w-16" }, "身高(cm)"), e('th', { className: "p-2.5 w-16" }, "體重(kg)"), e('th', { className: "p-2.5 w-14" }, "BMI"),
+                                        e('th', { className: "p-2.5" }, "體能測試細項指標 (支援直接手動輸入，計分常模即時聯動)"),
+                                        e('th', { className: "p-2.5" }, "專項運動技能 (項目可選，每格最高20分)"), e('th', { className: "p-2.5 w-20" }, "總分(100)"), e('th', { className: "p-2.5 w-16" }, "等第"), e('th', { className: "p-2.5 w-12" }, "操作")
+                                    )
+                                ),
+                                e('tbody', { className: "divide-y divide-slate-100 text-xs font-medium text-center" },
+                                    paginatedStudents.map(student => {
+                                        const conductScore = CONDUCT_RULES[student.conductGrade] || 0;
+                                        const isDse = student.isDsePe || false;
+
+                                        // 常規得分
+                                        const sitUpScore = isDse ? 0 : calculateSitUpScore(student.gender, student.sitUpsRaw, student.class);
+                                        const pushUpScore = isDse ? 0 : calculatePushUpScore(student.gender, student.pushUpsRaw || 0, student.class);
+                                        const runScore = isDse ? 0 : calculateRunScore(student.gender, student.runLapsRaw, student.class);
+                                        const sitReachScore = isDse ? 0 : calculateSitReachScore(student.gender, student.sitReachRaw || 0, student.class);
+                                        const run1000Score = isDse ? 0 : calculateRun1000Score(student.gender, student.run1000Raw || 0, student.class);
+
+                                        // DSE 得分
+                                        const dseSitUp = isDse ? calculateDseSitUpScore(student.gender, student.dseSitUpsRaw || 0) : 0;
+                                        const dsePullUp = isDse ? calculateDsePullUpScore(student.gender, student.dsePullUpsRaw || 0) : 0;
+                                        const dseRun1609 = isDse ? calculateDseRun1609Score(student.gender, student.dseRun1609Raw || 0) : 0;
+                                        const dseSitReach = isDse ? calculateDseSitReachScore(student.gender, student.dseSitReachRaw || 0) : 0;
+
+                                        const skillScore = calcSkillTotal(student);
+                                        
+                                        const fitnessTotal = isDse ? (dseSitUp + dsePullUp + dseRun1609 + dseSitReach) : (sitUpScore + pushUpScore + runScore + sitReachScore + run1000Score);
+                                        const rawTotal = student.attendance + conductScore + fitnessTotal + skillScore;
+                                        const total100 = Math.min(100, rawTotal);
+                                        const grade = calculateGrade(total100);
+
+                                        return e('tr', { key: student.id, className: "hover:bg-green-50/50 transition-colors" },
+                                            e('td', { className: "p-1.5" }, e('input', { type: "text", value: student.class, onChange: (evt) => updateStudentValue(student.id, 'class', evt.target.value), className: "w-10 text-center py-0.5 border border-transparent hover:border-emerald-300 focus:border-emerald-500 focus:bg-white rounded font-bold" })),
+                                            e('td', { className: "p-1.5" }, e('input', { type: "text", value: student.number, onChange: (evt) => updateStudentValue(student.id, 'number', evt.target.value), className: "w-10 text-center py-0.5 border border-transparent hover:border-emerald-300 focus:border-emerald-500 focus:bg-white rounded text-slate-500" })),
+                                            e('td', { className: "p-1.5 text-left font-bold" }, e('input', { type: "text", value: student.name, onChange: (evt) => updateStudentValue(student.id, 'name', evt.target.value), className: "w-20 px-1 py-0.5 border border-transparent hover:border-emerald-300 focus:border-emerald-500 focus:bg-white rounded text-slate-800 font-bold" })),
+                                            e('td', { className: "p-1.5" }, e('select', { value: student.gender, onChange: (evt) => updateStudentValue(student.id, 'gender', evt.target.value), className: "bg-transparent hover:bg-emerald-50 rounded px-1 py-0.5 font-bold text-center" }, e('option', { value: "M" }, "男"), e('option', { value: "F" }, "女"))),
+                                            e('td', { className: "p-1.5" }, e('select', { value: student.isDsePe ? "DSE" : "REG", onChange: (evt) => updateStudentValue(student.id, 'isDsePe', evt.target.value === "DSE"), className: "bg-transparent hover:bg-emerald-50 rounded px-1 py-0.5 font-bold text-center animate-fade-in" }, e('option', { value: "REG" }, "常規"), e('option', { value: "DSE" }, "DSE"))),
+                                            e('td', { className: "p-1.5" }, e('input', { type: "number", min: "0", max: "20", value: student.attendance, onChange: (evt) => updateStudentValue(student.id, 'attendance', evt.target.value), className: "w-10 text-center py-0.5 border border-transparent hover:border-emerald-300 focus:border-emerald-500 focus:bg-white rounded font-bold" })),
+                                            e('td', { className: "p-1.5" }, e('select', { value: student.conductGrade, onChange: (evt) => updateStudentValue(student.id, 'conductGrade', evt.target.value), className: "bg-transparent hover:bg-emerald-50 rounded px-1 py-0.5 font-bold" }, Object.keys(CONDUCT_RULES).map(g => e('option', { key: g, value: g }, g)))),
+                                            
+                                            e('td', { className: "p-1.5" }, e('input', { type: "number", step: "0.1", min: "0", value: student.height || "", onChange: (evt) => updateStudentValue(student.id, 'height', evt.target.value), className: "w-14 text-center py-0.5 border border-transparent hover:border-emerald-300 focus:border-emerald-500 focus:bg-white rounded font-bold" })),
+                                            e('td', { className: "p-1.5" }, e('input', { type: "number", step: "0.1", min: "0", value: student.weight || "", onChange: (evt) => updateStudentValue(student.id, 'weight', evt.target.value), className: "w-14 text-center py-0.5 border border-transparent hover:border-emerald-300 focus:border-emerald-500 focus:bg-white rounded font-bold" })),
+                                            e('td', { className: "p-1.5 font-bold text-slate-500" }, calcBMI(student.height, student.weight)),
+                                            // 體能測試細項手動輸入面板 (一千米與1609米 0 秒時直接完美顯示空白)
+                                            e('td', { className: "p-1.5 text-[11px]" }, 
+                                                !student.isDsePe ? (
+                                                    e('div', { className: "flex flex-wrap gap-1.5 justify-center items-center" },
+                                                        e('div', { className: "flex items-center bg-emerald-50 border border-emerald-100 rounded px-1.5 py-0.5" },
+                                                            e('span', { className: "text-[9px] text-slate-400 mr-1" }, "仰"),
+                                                            e('input', { type: "number", value: student.sitUpsRaw || "", onChange: (evt) => updateStudentValue(student.id, 'sitUpsRaw', evt.target.value), className: "w-7 text-center bg-transparent font-bold focus:outline-none focus:bg-white" }),
+                                                            e('span', { className: "text-[9px] text-emerald-700 ml-0.5 font-bold" }, `(${sitUpScore}分)`)
+                                                        ),
+                                                        e('div', { className: "flex items-center bg-emerald-50 border border-emerald-100 rounded px-1.5 py-0.5" },
+                                                            e('span', { className: "text-[9px] text-slate-400 mr-1" }, "掌"),
+                                                            e('input', { type: "number", value: student.pushUpsRaw || "", onChange: (evt) => updateStudentValue(student.id, 'pushUpsRaw', evt.target.value), className: "w-7 text-center bg-transparent font-bold focus:outline-none focus:bg-white" }),
+                                                            e('span', { className: "text-[9px] text-emerald-700 ml-0.5 font-bold" }, `(${pushUpScore}分)`)
+                                                        ),
+                                                        e('div', { className: "flex items-center bg-emerald-50 border border-emerald-100 rounded px-1.5 py-0.5" },
+                                                            e('span', { className: "text-[9px] text-slate-400 mr-1" }, "跑"),
+                                                            e('input', { type: "number", value: student.runLapsRaw || "", onChange: (evt) => updateStudentValue(student.id, 'runLapsRaw', evt.target.value), className: "w-7 text-center bg-transparent font-bold focus:outline-none focus:bg-white" }),
+                                                            e('span', { className: "text-[9px] text-emerald-700 ml-0.5 font-bold" }, `(${runScore}分)`)
+                                                        ),
+                                                        e('div', { className: "flex items-center bg-emerald-50 border border-emerald-100 rounded px-1.5 py-0.5" },
+                                                            e('span', { className: "text-[9px] text-slate-400 mr-1" }, "伸"),
+                                                            e('input', { type: "number", value: student.sitReachRaw || "", onChange: (evt) => updateStudentValue(student.id, 'sitReachRaw', evt.target.value), className: "w-7 text-center bg-transparent font-bold focus:outline-none focus:bg-white" }),
+                                                            e('span', { className: "text-[9px] text-emerald-700 ml-0.5 font-bold" }, `(${sitReachScore}分)`)
+                                                        ),
+                                                        e('div', { className: "flex items-center bg-emerald-50 border border-emerald-100 rounded px-1.5 py-0.5" },
+                                                            e('span', { className: "text-[9px] text-slate-400 mr-1" }, "千"),
+                                                            e('input', { type: "number", placeholder: "分", value: getMinVal(student.run1000Raw), onChange: (evt) => { const m = Math.max(0, parseInt(evt.target.value) || 0); const s = (student.run1000Raw || 0) % 60; updateStudentValue(student.id, 'run1000Raw', m * 60 + s); }, className: "w-5 text-center bg-transparent font-bold focus:outline-none focus:bg-white" }),
+                                                            e('span', { className: "text-[9px] text-slate-400 mx-0.5" }, "分"),
+                                                            e('input', { type: "number", placeholder: "秒", value: getSecVal(student.run1000Raw), onChange: (evt) => { const m = Math.floor((student.run1000Raw || 0) / 60); const s = Math.min(59, Math.max(0, parseInt(evt.target.value) || 0)); updateStudentValue(student.id, 'run1000Raw', m * 60 + s); }, className: "w-5 text-center bg-transparent font-bold focus:outline-none focus:bg-white" }),
+                                                            e('span', { className: "text-[9px] text-slate-400 mr-1" }, "秒"),
+                                                            e('span', { className: "text-[9px] text-emerald-700 font-bold" }, `(${run1000Score}分)`)
+                                                        )
+                                                    )
+                                                ) : (
+                                                    e('div', { className: "flex flex-wrap gap-1.5 justify-center items-center" },
+                                                        // 1. DSE 仰臥起坐
+                                                        e('div', { className: "flex items-center bg-teal-50 border border-teal-100 rounded px-1.5 py-0.5" },
+                                                            e('span', { className: "text-[9px] text-teal-700 mr-1 font-bold" }, "DSE仰"),
+                                                            e('input', { type: "number", value: student.dseSitUpsRaw || "", onChange: (evt) => updateStudentValue(student.id, 'dseSitUpsRaw', evt.target.value), className: "w-7 text-center bg-transparent font-bold focus:outline-none focus:bg-white text-teal-900" }),
+                                                            e('span', { className: "text-[9px] text-teal-800 ml-0.5 font-bold" }, `(${dseSitUp}分)`)
+                                                        ),
+                                                        // 2. DSE 引體上升 / 屈臂懸垂
+                                                        e('div', { className: "flex items-center bg-teal-50 border border-teal-100 rounded px-1.5 py-0.5" },
+                                                            e('span', { className: "text-[9px] text-teal-700 mr-1 font-bold" }, student.gender === 'M' ? "引體" : "懸垂"),
+                                                            e('input', { type: "number", value: student.dsePullUpsRaw || "", onChange: (evt) => updateStudentValue(student.id, 'dsePullUpsRaw', evt.target.value), className: "w-7 text-center bg-transparent font-bold focus:outline-none focus:bg-white text-teal-900" }),
+                                                            e('span', { className: "text-[9px] text-teal-800 ml-0.5 font-bold" }, `(${dsePullUp}分)`)
+                                                        ),
+                                                        // 3. DSE 1609米跑
+                                                        e('div', { className: "flex items-center bg-teal-50 border border-teal-100 rounded px-1.5 py-0.5" },
+                                                            e('span', { className: "text-[9px] text-teal-700 mr-1 font-bold" }, "1609"),
+                                                            e('input', { type: "number", placeholder: "分", value: getMinVal(student.dseRun1609Raw), onChange: (evt) => { const m = Math.max(0, parseInt(evt.target.value) || 0); const s = (student.dseRun1609Raw || 0) % 60; updateStudentValue(student.id, 'dseRun1609Raw', m * 60 + s); }, className: "w-5 text-center bg-transparent font-bold focus:outline-none focus:bg-white text-teal-900" }),
+                                                            e('span', { className: "text-[9px] text-teal-600 mx-0.5" }, "分"),
+                                                            e('input', { type: "number", placeholder: "秒", value: getSecVal(student.dseRun1609Raw), onChange: (evt) => { const m = Math.floor((student.dseRun1609Raw || 0) / 60); const s = Math.min(59, Math.max(0, parseInt(evt.target.value) || 0)); updateStudentValue(student.id, 'dseRun1609Raw', m * 60 + s); }, className: "w-5 text-center bg-transparent font-bold focus:outline-none focus:bg-white text-teal-900" }),
+                                                            e('span', { className: "text-[9px] text-teal-600 mr-1" }, "秒"),
+                                                            e('span', { className: "text-[9px] text-teal-800 font-bold" }, `(${dseRun1609}分)`)
+                                                        ),
+                                                        // 4. DSE 坐地前伸
+                                                        e('div', { className: "flex items-center bg-teal-50 border border-teal-100 rounded px-1.5 py-0.5" },
+                                                            e('span', { className: "text-[9px] text-teal-700 mr-1 font-bold" }, "DSE伸"),
+                                                            e('input', { type: "number", value: student.dseSitReachRaw || "", onChange: (evt) => updateStudentValue(student.id, 'dseSitReachRaw', evt.target.value), className: "w-7 text-center bg-transparent font-bold focus:outline-none focus:bg-white text-teal-900" }),
+                                                            e('span', { className: "text-[9px] text-teal-800 ml-0.5 font-bold" }, `(${dseSitReach}分)`)
+                                                        )
+                                                    )
+                                                )
+                                            ),
+
+                                            e('td', { className: "p-1.5 text-[11px]" },
+                                                e('div', { className: "grid grid-cols-3 gap-1 justify-items-center" },
+                                                    [1, 2, 3, 4, 5, 6].map(n => {
+                                                        const itemKey = 'skillItem' + n, ptsKey = 'skillPts' + n;
+                                                        const curItem = student[itemKey] || '';
+                                                        const opts = (curItem && !SKILL_OPTIONS.includes(curItem)) ? [...SKILL_OPTIONS, curItem] : SKILL_OPTIONS;
+                                                        return e('div', { key: n, className: "flex items-center bg-emerald-50 border border-emerald-100 rounded px-1 py-0.5" },
+                                                            e('select', { value: curItem, onChange: (evt) => updateStudentValue(student.id, itemKey, evt.target.value), className: "w-14 bg-transparent text-[9px] font-bold text-slate-500 focus:outline-none" },
+                                                                e('option', { value: "" }, "項目"),
+                                                                opts.map(o => e('option', { key: o, value: o }, o))
+                                                            ),
+                                                            e('input', { type: "number", min: "0", max: String(SKILL_MAX_PER_SLOT), value: student[ptsKey] || "", onChange: (evt) => updateStudentValue(student.id, ptsKey, evt.target.value), className: "w-7 text-center bg-transparent font-bold focus:outline-none focus:bg-white" })
+                                                        );
+                                                    })
+                                                )
+                                            ),
+                                            e('td', { className: "p-1.5 font-bold text-emerald-700 text-sm" }, total100),
+                                            e('td', { className: "p-1.5" }, e('span', { className: `inline-block px-2 py-0.5 rounded-md text-[10px] font-black ${grade === 'A' ? 'bg-emerald-100 text-emerald-800' : grade === 'B' ? 'bg-blue-100 text-blue-800' : grade === 'C' ? 'bg-amber-100 text-amber-800' : grade === 'D' ? 'bg-orange-100 text-orange-800' : 'bg-rose-100 text-rose-800'}` }, grade)),
+                                            e('td', { className: "p-1.5" }, e('button', { onClick: () => handleDeleteStudent(student.id, student.name), className: "p-1 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded transition-all" }, e(Icon, { name: "trash-2", className: "w-3.5 h-3.5" })))
+                                        );
+                                    })
+                                )
+                            )
+                        ),
+                        e('div', { className: "bg-slate-50 border-t border-slate-200 px-4 py-2.5 flex items-center justify-between text-xs" },
+                            e('span', { className: "text-slate-500 font-medium" }, `顯示 ${filteredStudents.length > 0 ? (currentPage-1)*ITEMS_PER_PAGE+1 : 0} 至 ${Math.min(currentPage*ITEMS_PER_PAGE, filteredStudents.length)} 筆資料 / 共 ${filteredStudents.length} 筆`),
+                            e('div', { className: "flex gap-1" },
+                                e('button', { disabled: currentPage <= 1, onClick: () => setCurrentPage(p => p - 1), className: "px-2.5 py-1 bg-white hover:bg-emerald-50 border border-slate-200 rounded text-[11px] font-bold disabled:opacity-40 text-slate-700 transition-colors" }, "上一頁"),
+                                e('span', { className: "font-bold flex items-center px-1.5 text-[11px]" }, `頁次 ${currentPage} / ${totalPages}`),
+                                e('button', { disabled: currentPage >= totalPages, onClick: () => setCurrentPage(p => p + 1), className: "px-2.5 py-1 bg-white hover:bg-emerald-50 border border-slate-200 rounded text-[11px] font-bold disabled:opacity-40 text-slate-700 transition-colors" }, "下一頁")
+                            )
+                        )
+                    ),
+
+                    // ==================== 評分常模基準與診斷面板 ====================
+                    activeTab === 'settings' && e('div', { className: "space-y-4 animate-fade-in" },
+                        
+                        // ☁️ 雲端連線與常模診斷面板
+                        e('div', { className: "bg-white border-2 border-emerald-500 rounded-xl p-5 shadow-soft relative overflow-hidden" },
+                            e('div', { className: "absolute top-0 right-0 w-32 h-32 bg-emerald-500/10 rounded-full filter blur-xl" }),
+                            e('h3', { className: "text-base font-bold text-slate-900 mb-2 flex items-center gap-2" }, 
+                                e(Icon, { name: "activity", className: "w-5 h-5 text-emerald-600 animate-pulse" }), "☁️ 雲端同步與備份狀態診斷儀表板"
+                            ),
+                            e('p', { className: "text-xs text-slate-500 mb-4 leading-relaxed font-semibold text-emerald-800" }, 
+                                "💡 檢測說明：為了解決協作平台重置本機緩存的硬體限制，系統每次 F5 重新整理或登入時，都會自動向雲端下載常模設定。請在下方輸入您的 Apps Script 網址並儲存，接著點擊「備份所有常模」即可將常模完全儲存在試算表，重新整理不丟失！"
+                            ),
+                            e('div', { className: "grid grid-cols-1 md:grid-cols-3 gap-3 mb-4" },
+                                e('div', { className: "bg-slate-50 p-3 rounded-lg border border-slate-200" },
+                                    e('span', { className: "block text-[10px] text-slate-400 font-bold" }, "雲端連線狀態"),
+                                    e('div', { className: "flex items-center gap-1.5 mt-1" },
+                                        e('span', { className: `w-2 h-2 rounded-full ${cloudConnectionStatus === 'success' ? 'bg-emerald-500 animate-ping' : cloudConnectionStatus === 'failed' ? 'bg-rose-500' : 'bg-amber-400'}` }),
+                                        e('span', { className: `text-xs font-black ${cloudConnectionStatus === 'success' ? 'text-emerald-700' : cloudConnectionStatus === 'failed' ? 'text-rose-700' : 'text-amber-700'}` }, 
+                                            cloudConnectionStatus === 'success' ? "連線成功 (常模儲存已激活)" : cloudConnectionStatus === 'failed' ? "連線失敗 (使用預設值)" : "未同步"
+                                        )
+                                    )
+                                ),
+                                e('div', { className: "bg-slate-50 p-3 rounded-lg border border-slate-200" },
+                                    e('span', { className: "block text-[10px] text-slate-400 font-bold" }, "常模狀態"),
+                                    e('span', { className: `block text-xs font-black mt-1 ${hasUnsavedConfig ? 'text-rose-600 animate-pulse' : 'text-emerald-600'}` },
+                                        hasUnsavedConfig ? "⚠️ 偵測到修改（未備份至雲端）" : "✅ 雲端設定已同步對齊"
+                                    )
+                                ),
+                                e('div', { className: "bg-slate-50 p-3 rounded-lg border border-slate-200 flex items-center justify-center" },
+                                    e('button', { onClick: testCloudConnection, className: "w-full py-1.5 bg-slate-200 hover:bg-slate-300 active:scale-95 text-slate-700 font-bold text-xs rounded transition-all flex items-center justify-center gap-1.5" },
+                                        e(Icon, { name: "refresh-cw", className: "w-3.5 h-3.5" }), "⚡ 測試雲端連線"
+                                    )
+                                )
+                            ),
+                            e('div', { className: "flex flex-col sm:flex-row gap-2 mb-4" },
+                                e('input', { 
+                                    type: "text", 
+                                    placeholder: "請在此填入 Apps Script 網頁應用程式 URL 網址", 
+                                    value: cloudUrl, 
+                                    onChange: (evt) => setCloudUrl(evt.target.value), 
+                                    className: "flex-1 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-mono font-semibold focus:outline-none focus:border-emerald-500" 
+                                }),
+                                e('button', { onClick: () => { safeLocalStorage.setItem('pe_cloud_url_v17_clear', cloudUrl); showToast("儲存成功！常模雲端備份網址已綁定。"); }, className: "px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg shadow-sm transition-all shrink-0" }, "儲存同步網址")
+                            ),
+                            e('div', { className: "flex justify-end" },
+                                e('button', { onClick: syncToGoogleSheet, className: "w-full sm:w-auto px-6 py-2.5 bg-green-600 hover:bg-green-500 active:scale-95 text-white font-black text-xs rounded-lg shadow-md transition-all flex items-center justify-center gap-1.5" },
+                                    e(Icon, { name: "cloud", className: "w-4 h-4" }), "💾 立即儲存並備份所有常模至雲端 Sheet"
+                                )
+                            )
+                        ),
+
+                        // 等第標準設定卡片 (100分 總分制)
+                        e('div', { className: "bg-white border border-slate-200 rounded-xl p-4 shadow-sm" },
+                            e('h3', { className: "text-sm font-bold text-slate-900 mb-3 flex items-center gap-1" }, e(Icon, { name: "sliders", className: "w-4 h-4 text-emerald-600" }), " 各級等第分界線設定 (100分 總分制)"),
+                            e('div', { className: "grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4" },
+                                ['A', 'B', 'C', 'D', 'E'].map(g => e('div', { key: g, className: "bg-green-50/50 p-2.5 rounded-lg border border-green-100 text-center" },
+                                    e('span', { className: "text-[10px] font-bold text-slate-400 block mb-1" }, `等級「${g}」基準線分數`),
+                                    e('input', { type: "number", step: "0.1", value: tempThresholds[g], onChange: (evt) => setTempThresholds(prev => ({ ...prev, [g]: parseFloat(evt.target.value) || 0 })), className: "w-full text-center bg-white border border-slate-200 rounded py-1 font-bold text-xs" })
+                                ))
+                            ),
+                            e('div', { className: "flex justify-end" }, e('button', { onClick: saveThresholds, className: "px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg shadow-sm transition-all flex items-center gap-1" }, e(Icon, { name: "save", className: "w-3.5 h-3.5" }), " 確定暫存等等第線"))
+                        ),
+
+                        // 核心常規體能常模表
+                        e('div', { className: "bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4" },
+                            e('h3', { className: "text-sm font-bold text-slate-900 border-b pb-2 flex items-center gap-1.5" }, e(Icon, { name: "school", className: "w-5 h-5 text-emerald-600" }), "🏫 普通體育常規項目評分常模基準線"),
+                            e('div', { className: "grid grid-cols-1 lg:grid-cols-2 gap-4" },
+                                // 1. Situps
+                                e('div', { className: "bg-slate-50 rounded-xl p-3 border" },
+                                    e('div', { className: "flex justify-between items-center mb-3 border-b pb-1.5" },
+                                        e('h4', { className: "text-xs font-bold text-slate-700 flex items-center gap-1" }, e(Icon, { name: "activity", className: "w-4 h-4 text-emerald-600" }), "1. 仰臥起坐 (Sit-up) 常規常模"),
+                                        e('select', { value: editingSitUpForm, onChange: (evt) => setEditingSitUpForm(evt.target.value), className: "bg-white border rounded px-1.5 py-0.5 text-[10px] font-bold" }, ["1", "2", "3", "4", "5", "6"].map(f => e('option', { key: f, value: f }, `中${getFormChineseLabel(f)}`)))
+                                    ),
+                                    e('div', { className: "grid grid-cols-2 gap-3" },
+                                        e('div', null, e('h5', { className: "text-[10px] font-bold text-emerald-700 mb-1.5 text-center" }, "男 (M)"), e('div', { className: "space-y-1" }, sitUpRulesByForm[editingSitUpForm]?.M.map((rule, idx) => e('div', { key: idx, className: "flex items-center justify-between text-[10px]" }, e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), e('div', { className: "flex items-center gap-0.5" }, "≥", e('input', { type: "number", value: rule.req, onChange: (evt) => updateSitUpRule('M', idx, 'req', evt.target.value), className: "w-9 text-center bg-white border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-emerald-500" }), "次"))))),
+                                        e('div', null, e('h5', { className: "text-[10px] font-bold text-rose-600 mb-1.5 text-center" }, "女 (F)"), e('div', { className: "space-y-1" }, sitUpRulesByForm[editingSitUpForm]?.F.map((rule, idx) => e('div', { key: idx, className: "flex items-center justify-between text-[10px]" }, e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), e('div', { className: "flex items-center gap-0.5" }, "≥", e('input', { type: "number", value: rule.req, onChange: (evt) => updateSitUpRule('F', idx, 'req', evt.target.value), className: "w-9 text-center bg-white border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-emerald-500" }), "次")))))
+                                    )
+                                ),
+                                // 2. Pushups
+                                e('div', { className: "bg-slate-50 rounded-xl p-3 border" },
+                                    e('div', { className: "flex justify-between items-center mb-3 border-b pb-1.5" },
+                                        e('h4', { className: "text-xs font-bold text-slate-700 flex items-center gap-1" }, e(Icon, { name: "arrow-up", className: "w-4 h-4 text-emerald-600" }), "2. 掌上壓 (Push-up) 常規常模"),
+                                        e('select', { value: editingPushUpForm, onChange: (evt) => setEditingPushUpForm(evt.target.value), className: "bg-white border rounded px-1.5 py-0.5 text-[10px] font-bold" }, ["1", "2", "3", "4", "5", "6"].map(f => e('option', { key: f, value: f }, `中${getFormChineseLabel(f)}`)))
+                                    ),
+                                    e('div', { className: "grid grid-cols-2 gap-3" },
+                                        e('div', null, e('h5', { className: "text-[10px] font-bold text-emerald-700 mb-1.5 text-center" }, "男 (M)"), e('div', { className: "space-y-1" }, pushUpRulesByForm[editingPushUpForm]?.M.map((rule, idx) => e('div', { key: idx, className: "flex items-center justify-between text-[10px]" }, e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), e('div', { className: "flex items-center gap-0.5" }, "≥", e('input', { type: "number", value: rule.req, onChange: (evt) => updatePushUpRule('M', idx, 'req', evt.target.value), className: "w-9 text-center bg-white border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-emerald-500" }), "次"))))),
+                                        e('div', null, e('h5', { className: "text-[10px] font-bold text-rose-600 mb-1.5 text-center" }, "女 (F)"), e('div', { className: "space-y-1" }, pushUpRulesByForm[editingPushUpForm]?.F.map((rule, idx) => e('div', { key: idx, className: "flex items-center justify-between text-[10px]" }, e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), e('div', { className: "flex items-center gap-0.5" }, "≥", e('input', { type: "number", value: rule.req, onChange: (evt) => updatePushUpRule('F', idx, 'req', evt.target.value), className: "w-9 text-center bg-white border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-emerald-500" }), "次")))))
+                                    )
+                                ),
+                                // 3. 9-Min Run
+                                e('div', { className: "bg-slate-50 rounded-xl p-3 border" },
+                                    e('div', { className: "flex justify-between items-center mb-3 border-b pb-1.5" },
+                                        e('h4', { className: "text-xs font-bold text-slate-700 flex items-center gap-1" }, e(Icon, { name: "navigation", className: "w-4 h-4 text-emerald-600" }), "3. 九分鐘耐力跑圈數"),
+                                        e('select', { value: editingRunForm, onChange: (evt) => setEditingRunForm(evt.target.value), className: "bg-white border rounded px-1.5 py-0.5 text-[10px] font-bold" }, ["1", "2", "3", "4", "5", "6"].map(f => e('option', { key: f, value: f }, `中${getFormChineseLabel(f)}`)))
+                                    ),
+                                    e('div', { className: "grid grid-cols-2 gap-3" },
+                                        e('div', null, e('h5', { className: "text-[10px] font-bold text-emerald-700 mb-1.5 text-center" }, "男 (M)"), e('div', { className: "space-y-1" }, runRulesByForm[editingRunForm]?.M.map((rule, idx) => e('div', { key: idx, className: "flex items-center justify-between text-[10px]" }, e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), e('div', { className: "flex items-center gap-0.5" }, "≥", e('input', { type: "number", value: rule.req, onChange: (evt) => updateRunRule('M', idx, 'req', evt.target.value), className: "w-9 text-center bg-white border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-emerald-500" }), "圈"))))),
+                                        e('div', null, e('h5', { className: "text-[10px] font-bold text-rose-600 mb-1.5 text-center" }, "女 (F)"), e('div', { className: "space-y-1" }, runRulesByForm[editingRunForm]?.F.map((rule, idx) => e('div', { key: idx, className: "flex items-center justify-between text-[10px]" }, e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), e('div', { className: "flex items-center gap-0.5" }, "≥", e('input', { type: "number", value: rule.req, onChange: (evt) => updateRunRule('F', idx, 'req', evt.target.value), className: "w-9 text-center bg-white border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-emerald-500" }), "圈")))))
+                                    )
+                                ),
+                                // 4. Sit & Reach
+                                e('div', { className: "bg-slate-50 rounded-xl p-3 border" },
+                                    e('div', { className: "flex justify-between items-center mb-3 border-b pb-1.5" },
+                                        e('h4', { className: "text-xs font-bold text-slate-700 flex items-center gap-1" }, e(Icon, { name: "sliders", className: "w-4 h-4 text-emerald-600" }), "4. 坐地前伸 (cm)"),
+                                        e('select', { value: editingSitReachForm, onChange: (evt) => setEditingSitReachForm(evt.target.value), className: "bg-white border rounded px-1.5 py-0.5 text-[10px] font-bold" }, ["1", "2", "3", "4", "5", "6"].map(f => e('option', { key: f, value: f }, `中${getFormChineseLabel(f)}`)))
+                                    ),
+                                    e('div', { className: "grid grid-cols-2 gap-3" },
+                                        e('div', null, e('h5', { className: "text-[10px] font-bold text-emerald-700 mb-1.5 text-center" }, "男 (M)"), e('div', { className: "space-y-1" }, sitReachRulesByForm[editingSitReachForm]?.M.map((rule, idx) => e('div', { key: idx, className: "flex items-center justify-between text-[10px]" }, e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), e('div', { className: "flex items-center gap-0.5" }, "≥", e('input', { type: "number", value: rule.req, onChange: (evt) => updateSitReachRule('M', idx, 'req', evt.target.value), className: "w-9 text-center bg-white border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-emerald-500" }), "cm"))))),
+                                        e('div', null, e('h5', { className: "text-[10px] font-bold text-rose-600 mb-1.5 text-center" }, "女 (F)"), e('div', { className: "space-y-1" }, sitReachRulesByForm[editingSitReachForm]?.F.map((rule, idx) => e('div', { key: idx, className: "flex items-center justify-between text-[10px]" }, e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), e('div', { className: "flex items-center gap-0.5" }, "≥", e('input', { type: "number", value: rule.req, onChange: (evt) => updateSitReachRule('F', idx, 'req', evt.target.value), className: "w-9 text-center bg-white border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-emerald-500" }), "cm")))))
+                                    )
+                                ),
+                                // 一千米
+                                e('div', { className: "bg-slate-50 rounded-xl p-3 border mt-4" },
+                                    e('div', { className: "flex justify-between items-center mb-3 border-b pb-1.5" },
+                                        e('h4', { className: "text-xs font-bold text-slate-700 flex items-center gap-1" }, e(Icon, { name: "timer", className: "w-4 h-4 text-emerald-600" }), "5. 一千米跑 (秒數越小越快)"),
+                                        e('select', { value: editingRun1000Form, onChange: (evt) => setEditingRun1000Form(evt.target.value), className: "bg-white border rounded px-1.5 py-0.5 text-[10px] font-bold" }, ["1", "2", "3", "4", "5", "6"].map(f => e('option', { key: f, value: f }, `中${getFormChineseLabel(f)}`)))
+                                    ),
+                                    e('div', { className: "grid grid-cols-2 gap-4" },
+                                        e('div', null, e('h5', { className: "text-[10px] font-bold text-emerald-700 mb-1.5 text-center" }, "男 (M)"), e('div', { className: "grid grid-cols-1 gap-1.5 text-center" }, run1000RulesByForm[editingRun1000Form]?.M.map((rule, idx) => e('div', { key: idx, className: "flex items-center justify-between text-[10px]" }, e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), e('div', { className: "flex items-center gap-1" }, "≤", e('input', { type: "number", value: rule.req, onChange: (evt) => updateRun1000Rule('M', idx, 'req', evt.target.value), className: "w-14 text-center bg-white border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-emerald-500" }), e('span', { className: "text-slate-400 scale-90" }, `(${formatTime(rule.req)})`)))))),
+                                        e('div', null, e('h5', { className: "text-[10px] font-bold text-rose-600 mb-1.5 text-center" }, "女 (F)"), e('div', { className: "grid grid-cols-1 gap-1.5 text-center" }, run1000RulesByForm[editingRun1000Form]?.F.map((rule, idx) => e('div', { key: idx, className: "flex items-center justify-between text-[10px]" }, e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), e('div', { className: "flex items-center gap-1" }, "≤", e('input', { type: "number", value: rule.req, onChange: (evt) => updateRun1000Rule('F', idx, 'req', evt.target.value), className: "w-14 text-center bg-white border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-emerald-500" }), e('span', { className: "text-slate-400 scale-90" }, `(${formatTime(rule.req)})`))))))
+                                    )
+                                )
+                            )
+                        ),
+
+                        // DSE 常模對照表 (5分滿分制，共 20 分)
+                        e('div', { className: "bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4 animate-fade-in" },
+                            e('h3', { className: "text-sm font-bold text-teal-900 border-b pb-2 flex items-center gap-1.5" }, e(Icon, { name: "award", className: "w-5 h-5 text-teal-600" }), "🎓 香港中學文憑考試 (DSE體育) 體能項目評分常模 (每項最高 5 分)"),
+                            e('div', { className: "flex p-0.5 bg-slate-100 rounded-lg max-w-md animate-fade-in" },
+                                e('button', { onClick: () => setDseEditingTab('situp'), className: `flex-1 text-center py-1 text-[10px] font-bold rounded-md ${dseEditingTab === 'situp' ? 'bg-teal-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}` }, "1. DSE 仰臥起坐"),
+                                e('button', { onClick: () => setDseEditingTab('pullup'), className: `flex-1 text-center py-1 text-[10px] font-bold rounded-md ${dseEditingTab === 'pullup' ? 'bg-teal-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}` }, "2. DSE 引體/懸垂"),
+                                e('button', { onClick: () => setDseEditingTab('run1609'), className: `flex-1 text-center py-1 text-[10px] font-bold rounded-md ${dseEditingTab === 'run1609' ? 'bg-teal-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}` }, "3. DSE 1609米跑"),
+                                e('button', { onClick: () => setDseEditingTab('sitreach'), className: `flex-1 text-center py-1 text-[10px] font-bold rounded-md ${dseEditingTab === 'sitreach' ? 'bg-teal-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}` }, "4. DSE 坐地前伸")
+                            ),
+
+                            e('div', { className: "bg-slate-50 rounded-xl p-3 border animate-fade-in" },
+                                e('div', { className: "grid grid-cols-2 gap-4" },
+                                    e('div', null, 
+                                        e('h5', { className: "text-[10px] font-bold text-teal-700 mb-2 pb-1 border-b text-center" }, dseEditingTab === 'pullup' ? "男生：引體上升 (M)" : "男生基準線 (M)"),
+                                        e('div', { className: "grid grid-cols-1 gap-y-1" },
+                                            (dseEditingTab === 'situp' ? dseSitUpRules.M : dseEditingTab === 'pullup' ? dsePullUpRules.M : dseEditingTab === 'run1609' ? dseRun1609Rules.M : dseSitReachRules.M).map((rule, idx) => 
+                                                e('div', { key: idx, className: "flex items-center justify-between text-[10px] bg-white border border-slate-100 p-1.5 rounded shadow-sm" }, 
+                                                    e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), 
+                                                    e('div', { className: "flex items-center gap-0.5 font-semibold" }, 
+                                                        dseEditingTab === 'run1609' ? "≤" : "≥", 
+                                                        e('input', { 
+                                                            type: "number", 
+                                                            value: rule.req, 
+                                                            onChange: (evt) => updateDseRule(dseEditingTab, 'M', idx, evt.target.value), 
+                                                            className: "w-12 text-center bg-slate-50 border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-teal-500" 
+                                                        }), 
+                                                        dseEditingTab === 'run1609' ? "秒" : dseEditingTab === 'sitreach' ? "cm" : "次"
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    ),
+                                    e('div', null, 
+                                        e('h5', { className: "text-[10px] font-bold text-rose-600 mb-2 pb-1 border-b text-center" }, dseEditingTab === 'pullup' ? "女生：屈臂懸垂 (F)" : "女生基準線 (F)"),
+                                        e('div', { className: "grid grid-cols-1 gap-y-1" },
+                                            (dseEditingTab === 'situp' ? dseSitUpRules.F : dseEditingTab === 'pullup' ? dsePullUpRules.F : dseEditingTab === 'run1609' ? dseRun1609Rules.F : dseSitReachRules.F).map((rule, idx) => 
+                                                e('div', { key: idx, className: "flex items-center justify-between text-[10px] bg-white border border-slate-100 p-1.5 rounded shadow-sm" }, 
+                                                    e('span', { className: "text-slate-400 font-bold" }, `${rule.score}分`), 
+                                                    e('div', { className: "flex items-center gap-0.5 font-semibold" }, 
+                                                        dseEditingTab === 'run1609' ? "≤" : "≥", 
+                                                        e('input', { 
+                                                            type: "number", 
+                                                            value: rule.req, 
+                                                            onChange: (evt) => updateDseRule(dseEditingTab, 'F', idx, evt.target.value), 
+                                                            className: "w-12 text-center bg-slate-50 border rounded text-[10px] py-0.5 font-bold focus:ring-1 focus:ring-teal-500" 
+                                                        }), 
+                                                        dseEditingTab === 'run1609' ? "秒" : dseEditingTab === 'pullup' ? "秒" : dseEditingTab === 'sitreach' ? "cm" : "次"
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                ),
+
+                // 匯出 CSV 控制視窗
+                exportModalOpen && e('div', { className: "fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" },
+                    e('div', { className: "bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200" },
+                        e('div', { className: "flex justify-between items-center mb-4" },
+                            e('h4', { className: "text-sm font-bold text-slate-900 flex items-center gap-1.5" }, e(Icon, { name: "filter", className: "text-emerald-700 w-4 h-4" }), "選擇 CSV 導出範圍"),
+                            e('button', { onClick: () => setExportModalOpen(false), className: "text-slate-400 hover:text-slate-700 bg-slate-100 p-1 rounded-full" }, e(Icon, { name: "x", className: "w-4 h-4" }))
+                        ),
+                        e('div', { className: "space-y-4 text-xs font-semibold" },
+                            e('div', null,
+                                e('span', { className: "block text-slate-400 mb-1.5" }, "請選擇導出層級"),
+                                e('div', { className: "grid grid-cols-3 gap-2" },
+                                    e('button', { onClick: () => setExportScope("all"), className: `py-2 rounded-lg font-bold transition-all border ${exportScope === 'all' ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}` }, "全校"),
+                                    e('button', { onClick: () => setExportScope("class"), className: `py-2 rounded-lg font-bold transition-all border ${exportScope === 'class' ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}` }, "指定班別"),
+                                    e('button', { onClick: () => setExportScope("grade"), className: `py-2 rounded-lg font-bold transition-all border ${exportScope === 'grade' ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}` }, "指定年級")
+                                )
+                            ),
+                            exportScope === 'class' && e('div', null,
+                                e('span', { className: "block text-slate-400 mb-1" }, "請選擇班別"),
+                                e('select', { value: exportTargetClass, onChange: (evt) => setExportTargetClass(evt.target.value), className: "w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-2 font-bold cursor-pointer" },
+                                    classesList.filter(c => c !== 'All').map(c => e('option', { key: c, value: c }, `${c} 班`))
+                                )
+                            ),
+                            exportScope === 'grade' && e('div', null,
+                                e('span', { className: "block text-slate-400 mb-1" }, "請選擇年級"),
+                                e('select', { value: exportTargetGrade, onChange: (evt) => setExportTargetGrade(evt.target.value), className: "w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-2 font-bold cursor-pointer" },
+                                    ["1", "2", "3", "4", "5", "6"].map(f => e('option', { key: f, value: f }, `中${getFormChineseLabel(f)} 級`))
+                                )
+                            ),
+                            e('div', { className: "flex gap-2 justify-end pt-3 border-t border-slate-100" },
+                                e('button', { type: "button", onClick: () => setExportModalOpen(false), className: "px-3 py-1.5 text-slate-500 hover:bg-slate-100 rounded-lg" }, "取消"),
+                                e('button', { onClick: executeExportCSV, className: "px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg shadow font-bold animate-fade-in" }, "立即導出")
+                            )
+                        )
+                    )
+                ),
+
+                // Excel 導入預覽視窗
+                importModalOpen && e('div', { className: "fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" },
+                    e('div', { className: "bg-white rounded-2xl max-w-2xl w-full p-5 shadow-2xl border border-slate-200 flex flex-col max-h-[80vh]" },
+                        e('div', { className: "flex justify-between items-center mb-3" },
+                            e('h4', { className: "text-sm font-bold text-slate-900 flex items-center gap-1.5" }, e(Icon, { name: "table", className: "text-emerald-700 w-4 h-4" }), " Excel 匯入預覽及 analysis"),
+                            e('button', { onClick: () => setImportModalOpen(false), className: "text-slate-400 hover:text-slate-700 bg-slate-100 p-1.5 rounded-full" }, e(Icon, { name: "x", className: "w-4 h-4" }))
+                        ),
+                        importError ? e('div', { className: "bg-rose-50 border border-rose-200 text-rose-800 p-3 rounded-lg text-xs font-semibold mb-3" }, `⚠️ ${importError}`) : e('p', { className: "text-[11px] text-slate-500 mb-3 font-semibold" }, `偵測到共計 ${previewStudents.length} 筆學生成績數據。覆蓋導入後，所有現存本機與雲端的臨時數據將被覆蓋，建議確認無誤後點擊執行。`),
+                        e('div', { className: "flex-1 overflow-auto border border-slate-200 rounded-lg mb-4 no-scrollbar" },
+                            e('table', { className: "w-full text-left border-collapse text-xs" },
+                                e('thead', { className: "bg-slate-50 sticky top-0 border-b border-slate-200" },
+                                    e('tr', { className: "font-bold text-slate-500" }, e('th', { className: "p-2" }, "班別"), e('th', { className: "p-2" }, "學號"), e('th', { className: "p-2" }, "姓名"), e('th', { className: "p-2" }, "性別"), e('th', { className: "p-2" }, "選修分類"), e('th', { className: "p-2" }, "出席次數"), e('th', { className: "p-2" }, "常規仰臥"), e('th', { className: "p-2" }, "DSE仰臥"))
+                                ),
+                                e('tbody', { className: "divide-y divide-slate-100" },
+                                    previewStudents.map((s, idx) => e('tr', { key: idx, className: "hover:bg-slate-50/50" },
+                                        e('td', { className: "p-2 font-bold text-slate-600" }, s.class), e('td', { className: "p-2 text-slate-400" }, s.number), e('td', { className: "p-2 font-bold text-slate-800" }, s.name), e('td', { className: "p-2 text-slate-400" }, s.gender === 'M' ? '男' : '女'), e('td', { className: "p-2 font-bold text-teal-600 animate-pulse" }, s.isDsePe ? 'DSE' : '常規'), e('td', { className: "p-2" }, s.attendance), e('td', { className: "p-2" }, s.sitUpsRaw), e('td', { className: "p-2" }, s.dseSitUpsRaw)
+                                    ))
+                                )
+                            )
+                        ),
+                        e('div', { className: "flex gap-2 justify-end pt-2 border-t border-slate-100 text-xs" },
+                            e('button', { onClick: () => setImportModalOpen(false), className: "px-3 py-1.5 font-bold text-slate-500 hover:bg-slate-50 rounded-lg" }, "取消"),
+                            e('button', { disabled: previewStudents.length === 0, onClick: confirmImport, className: "px-3.5 py-1.5 font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 rounded-lg shadow" }, "確認覆蓋並導入")
+                        )
+                    )
+                ),
+
+                // 新增學生彈出視窗
+                addModalOpen && e('div', { className: "fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" },
+                    e('div', { className: "bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200" },
+                        e('div', { className: "flex justify-between items-center mb-4" },
+                            e('h4', { className: "text-sm font-bold text-slate-900 flex items-center gap-1" }, e(Icon, { name: "user-plus", className: "text-emerald-700 w-4 h-4" }), " 新增學生資料卡"),
+                            e('button', { onClick: () => setAddModalOpen(false), className: "text-slate-400 hover:text-slate-700 bg-slate-100 p-1.5 rounded-full" }, e(Icon, { name: "x", className: "w-4 h-4" }))
+                        ),
+                        e('form', { onSubmit: handleAddStudent, className: "space-y-3.5 text-xs font-semibold" },
+                            e('div', { className: "grid grid-cols-2 gap-2.5" },
+                                e('div', null, e('label', { className: "block font-bold text-slate-400 mb-1" }, "班別 (如 2A)"), e('input', { type: "text", required: true, value: newStudent.class, onChange: (evt) => setNewStudent(prev => ({ ...prev, class: evt.target.value })), className: "w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-bold focus:outline-none" })),
+                                e('div', null, e('label', { className: "block font-bold text-slate-400 mb-1" }, "學號 (No.)"), e('input', { type: "text", required: true, value: newStudent.number, onChange: (evt) => setNewStudent(prev => ({ ...prev, number: evt.target.value })), className: "w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-bold focus:outline-none" }))
+                            ),
+                            e('div', { className: "grid grid-cols-2 gap-2.5" },
+                                e('div', null, e('label', { className: "block font-bold text-slate-400 mb-1" }, "中文姓名"), e('input', { type: "text", required: true, value: newStudent.name, onChange: (evt) => setNewStudent(prev => ({ ...prev, name: evt.target.value })), className: "w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-bold focus:outline-none" })),
+                                e('div', null, e('label', { className: "block font-bold text-slate-400 mb-1" }, "性別"), e('select', { value: newStudent.gender, onChange: (evt) => setNewStudent(prev => ({ ...prev, gender: evt.target.value })), className: "w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 font-bold focus:outline-none" }, e('option', { value: "M" }, "男生 (Male)"), e('option', { value: "F" }, "女生 (Female)")))
+                            ),
+                            e('div', { className: "grid grid-cols-2 gap-2.5" },
+                                e('div', null, e('label', { className: "block font-bold text-slate-400 mb-1" }, "出席率 (最高20)"), e('input', { type: "number", max: "20", min: "0", value: newStudent.attendance, onChange: (evt) => setNewStudent(prev => ({ ...prev, attendance: parseInt(evt.target.value) || 0 })), className: "w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-bold focus:outline-none" })),
+                                e('div', null, e('label', { className: "block font-bold text-slate-400 mb-1" }, "學習態度評級"), e('select', { value: newStudent.conductGrade, onChange: (evt) => setNewStudent(prev => ({ ...prev, conductGrade: evt.target.value })), className: "w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-bold focus:outline-none" }, Object.keys(CONDUCT_RULES).map(g => e('option', { key: g, value: g }, g))))
+                            ),
+                            e('div', null, 
+                                e('label', { className: "flex items-center gap-2 cursor-pointer mt-2" }, 
+                                    e('input', { type: "checkbox", checked: newStudent.isDsePe, onChange: (evt) => setNewStudent(prev => ({ ...prev, isDsePe: evt.target.checked })), className: "w-4 h-4 text-emerald-600 border-slate-300 rounded" }),
+                                    e('span', { className: "text-slate-700 font-bold" }, "是否設定為 DSE 體育選修考生")
+                                )
+                            ),
+                            e('div', { className: "flex gap-2 justify-end pt-3 border-t border-slate-100" },
+                                e('button', { type: "button", onClick: () => setAddModalOpen(false), className: "px-3 py-1.5 font-bold text-slate-500 hover:bg-slate-50 rounded-lg" }, "取消"),
+                                e('button', { type: "submit", className: "px-3.5 py-1.5 font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg shadow-sm" }, "確認新增")
+                            )
+                        )
+                    )
+                )
+            );
+        }
+
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(e(App));
+    </script>
+</body>
+</html>
