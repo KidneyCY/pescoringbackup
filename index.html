@@ -41,7 +41,7 @@
         // =========================================================================
         // 💡 老師請注意：請將您部署好的 Google Apps Script 網頁應用程式網址填入下方雙引號中！
         // =========================================================================
-        const DEFAULT_CLOUD_URL = "https://script.google.com/macros/s/AKfycbx6x3xeEJ0mHgZ-46O8-_79U4-ShJPWnC_bs-t8-FOWdDlpfZuWCNMophAwjFgqcvHndw/exec"; 
+        const DEFAULT_CLOUD_URL = "https://script.google.com/macros/s/AKfycbxs4MQBoj0p5UkUqQuG4lFD4aIrYy_2usc_N1AoTBxfIijren0e40OJq3oPgbI4liGcZg/exec"; 
 
         const { useState, useEffect, useMemo, createElement, useRef } = React;
         const e = createElement;
@@ -64,6 +64,7 @@
         };
 
         // ==================== 專項運動技能 (6 格，項目可選) ====================
+        const EXPECTED_SCRIPT_VERSION = 'sheet-layout-44';   // 必須和 Apps Script 開頭的 SCRIPT_VERSION 相同，不同就不允許同步 (避免舊版 script 弄亂試算表)
         const SKILL_SLOTS = 6;
         const SKILL_MAX_PER_SLOT = 20;   // 每一格最高分
         const SKILL_TOTAL_CAP = SKILL_SLOTS * SKILL_MAX_PER_SLOT;   // 專項技能總分上限：6 格 × 20 分 = 120 (如要限制，改成想要的數字)
@@ -214,13 +215,13 @@
         }
 
         // ==================== 🛠 *全域時間分秒輔助函數與提示 (安全提升)* ====================
-        function showToast(message, type = 'success') {
+        function showToast(message, type = 'success', duration = 3000) {
             const toastEl = document.getElementById('pe-toast');
             if (toastEl) {
                 toastEl.innerText = message;
                 toastEl.className = `fixed top-4 right-4 z-50 flex items-center gap-2 px-4 py-3 rounded-xl shadow-xl font-semibold text-xs tracking-wide border transition-all ${type === 'error' ? 'bg-rose-50 border-rose-200 text-rose-800' : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`;
                 toastEl.style.display = 'flex';
-                setTimeout(() => { toastEl.style.display = 'none'; }, 3000);
+                setTimeout(() => { toastEl.style.display = 'none'; }, duration);
             }
         }
 
@@ -726,6 +727,17 @@
                     return df;
                 };
                 try {
+                    // 先確認雲端 Apps Script 是最新版本；舊版 script 用舊的欄位排列寫入會弄亂試算表，所以版本不符一律中止
+                    let versionOk = false;
+                    try {
+                        const vResp = await fetch(targetUrl, { method: 'POST', mode: 'cors', redirect: 'follow', body: JSON.stringify({ action: 'version' }) });
+                        const vRes = await vResp.json();
+                        versionOk = !!vRes && vRes.status === 'success' && vRes.version === EXPECTED_SCRIPT_VERSION;
+                    } catch (vErr) { versionOk = false; }
+                    if (!versionOk) {
+                        showToast("❌ 同步已中止：雲端 Apps Script 不是最新版本。請到 Apps Script「部署」→「管理部署作業」→ 鉛筆圖示 → 版本選「建立新版本」→「部署」，再重新同步。", 'error', 10000);
+                        return;
+                    }
                     const payload = students.map(student => {
                         const conductScore = CONDUCT_RULES[student.conductGrade] || 0;
                         const isDse = student.isDsePe || false;
