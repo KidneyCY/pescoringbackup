@@ -296,6 +296,7 @@
             const [isSyncing, setIsSyncing] = useState(false);
             const [isCloudLoading, setIsCloudLoading] = useState(false);
             const [cloudConnectionStatus, setCloudConnectionStatus] = useState("pending");
+            const [scriptVersion, setScriptVersion] = useState('');   // 最近一次讀取雲端時，Apps Script 回報的版本號
 
             const pwdRef = useRef(passwordInput);
             useEffect(() => {
@@ -389,6 +390,7 @@
                             if (c.dseSitReachRules && c.dseSitReachRules.M && c.dseSitReachRules.M.length === 5) setDseSitReachRules(c.dseSitReachRules);
                         }
                         setCloudConnectionStatus("success");
+                        setScriptVersion(result.version || '舊版 (沒有版本號)');
                         setHasUnsavedConfig(false);
                         if (!silent) showToast("☁️ 雙向自動同步成功！已成功加載雲端自訂常模與分數標準。");
                     } else {
@@ -1250,7 +1252,7 @@
                             ),
                             e('div', { className: "min-w-0" },
                                 e('h1', { className: "text-sm sm:text-base md:text-lg font-bold tracking-wider text-white whitespace-nowrap truncate max-w-full" }, "中華基督會譚李麗芬紀念中學體育科登分系統"),
-                                e('p', { className: "text-[10px] font-bold text-emerald-200 tracking-wider truncate max-w-full uppercase" }, "體育科核心測評管理系統 v17 - 常規與DSE體能雙模隔離儲存版")
+                                e('p', { className: "text-[10px] font-bold text-emerald-200 tracking-wider truncate max-w-full uppercase" }, `體育科核心測評管理系統 v17 - 專項六格版 (版本 ${EXPECTED_SCRIPT_VERSION})`)
                             )
                         ),
                         e('div', { className: "flex flex-wrap items-center gap-2 w-full xl:w-auto justify-end text-xs" },
@@ -1729,6 +1731,11 @@
                                     className: "flex-1 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-mono font-semibold focus:outline-none focus:border-emerald-500" 
                                 }),
                                 e('button', { onClick: () => { safeLocalStorage.setItem('pe_cloud_url_v17_clear', cloudUrl); showToast("儲存成功！常模雲端備份網址已綁定。"); }, className: "px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg shadow-sm transition-all shrink-0" }, "儲存同步網址")
+                            ),
+                            e('p', { className: `text-xs font-bold mb-3 ${scriptVersion === EXPECTED_SCRIPT_VERSION ? 'text-emerald-700' : 'text-rose-600'}` },
+                                scriptVersion === '' ? `網頁版本：${EXPECTED_SCRIPT_VERSION}　|　Apps Script 版本：尚未讀取 (請按「測試雲端連線」)` :
+                                scriptVersion === EXPECTED_SCRIPT_VERSION ? `✅ 網頁與 Apps Script 版本相符 (${EXPECTED_SCRIPT_VERSION})` :
+                                `⚠️ 版本不符：網頁是 ${EXPECTED_SCRIPT_VERSION}，Apps Script 是 ${scriptVersion}。請在 Apps Script 貼上最新程式碼並重新部署新版本，否則無法同步。`
                             ),
                             e('div', { className: "flex justify-end" },
                                 e('button', { onClick: syncToGoogleSheet, className: "w-full sm:w-auto px-6 py-2.5 bg-green-600 hover:bg-green-500 active:scale-95 text-white font-black text-xs rounded-lg shadow-md transition-all flex items-center justify-center gap-1.5" },
