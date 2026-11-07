@@ -41,7 +41,7 @@
         // =========================================================================
         // 💡 老師請注意：請將您部署好的 Google Apps Script 網頁應用程式網址填入下方雙引號中！
         // =========================================================================
-        const DEFAULT_CLOUD_URL = "https://script.google.com/macros/s/AKfycbz_mhju1CtzS5BqZfcGVXT2Yw4jLAFXMfFGJpJoUSnxOiqtaiNwraxBtJUJO1V2becnyg/exec"; 
+        const DEFAULT_CLOUD_URL = "https://script.google.com/macros/s/AKfycbxs4MQBoj0p5UkUqQuG4lFD4aIrYy_2usc_N1AoTBxfIijren0e40OJq3oPgbI4liGcZg/exec"; 
 
         const { useState, useEffect, useMemo, createElement, useRef } = React;
         const e = createElement;
@@ -64,7 +64,10 @@
         };
 
         // ==================== 專項運動技能 (6 格，項目可選) ====================
-        const EXPECTED_SCRIPT_VERSION = 'sheet-layout-44';   // 必須和 Apps Script 開頭的 SCRIPT_VERSION 相同，不同就不允許同步 (避免舊版 script 弄亂試算表)
+        const EXPECTED_SCRIPT_VERSION = 'sheet-layout-44-r2';   // 必須和 Apps Script 開頭的 SCRIPT_VERSION 相同，不同就不允許同步 (避免舊版 script 弄亂試算表)
+        // 欄位中文名稱 (同步時如果和其他老師衝突，用來顯示是哪個欄位)
+        const FIELD_LABELS = { sitUpsRaw: '仰臥起坐', pushUpsRaw: '掌上壓', runLapsRaw: '九分鐘跑', sitReachRaw: '坐地前伸', run1000Raw: '一千米跑', dseSitUpsRaw: 'DSE仰臥起坐', dsePullUpsRaw: 'DSE引體/懸垂', dseRun1609Raw: 'DSE1609米跑', dseSitReachRaw: 'DSE坐地前伸', attendance: '出席', conductGrade: '學習態度', height: '身高', weight: '體重', gender: '性別', isDsePe: '課程分類', class: '班別', number: '學號', name: '姓名' };
+        const fieldLabel = (k) => FIELD_LABELS[k] || (/^skillItem[1-6]$/.test(k) ? `專項${k.slice(-1)}項目` : /^skillPts[1-6]$/.test(k) ? `專項${k.slice(-1)}分數` : k);
         const SKILL_SLOTS = 6;
         const SKILL_MAX_PER_SLOT = 20;   // 每一格最高分
         const SKILL_TOTAL_CAP = SKILL_SLOTS * SKILL_MAX_PER_SLOT;   // 專項技能總分上限：6 格 × 20 分 = 120 (如要限制，改成想要的數字)
@@ -728,6 +731,13 @@
                     if (base) df = df.filter(k => !sameVal(student[k], base[k]));
                     return df;
                 };
+                // 每個修改欄位附上「這部裝置上次讀到的雲端值」，Apps Script 用它判斷雲端的值有沒有被其他老師改過
+                const baseFieldsOf = (student, fields) => {
+                    const base = baseRef.current[student.id];
+                    const out = {};
+                    fields.forEach(k => { out[k] = (base && base[k] !== undefined) ? base[k] : null; });
+                    return out;
+                };
                 try {
                     // 先確認雲端 Apps Script 是最新版本；舊版 script 用舊的欄位排列寫入會弄亂試算表，所以版本不符一律中止
                     let versionOk = false;
@@ -767,9 +777,12 @@
                             skillPayload['skillPts' + n] = parseInt(student['skillPts' + n]) || 0;
                         }
 
+                        const df = dirtyFieldsOf(student);
+
                         return {
                             id: student.id,
-                            dirtyFields: dirtyFieldsOf(student),
+                            dirtyFields: df,
+                            baseFields: baseFieldsOf(student, df),
                             class: student.class,
                             number: student.number,
                             name: student.name,
@@ -835,7 +848,8 @@
                     if (result.status === 'success') {
                         setHasUnsavedConfig(false);
                         setCloudConnectionStatus("success");
-                        setDirty(prev => {
+                        // 清除「已上傳」的修改記錄；先同步更新 ref，讓下面讀回雲端時直接採用雲端的值
+                        const clearSent = (prev) => {
                             const n = { ...prev };
                             Object.keys(sentDirty).forEach(id => {
                                 const rem = { ...(n[id] || {}) };
@@ -843,9 +857,17 @@
                                 if (Object.keys(rem).length) n[id] = rem; else delete n[id];
                             });
                             return n;
-                        });
+                        };
+                        dirtyRef.current = clearSent(dirtyRef.current);
+                        setDirty(prev => clearSent(prev));
                         const uploadFieldCount = payload.reduce((a, p) => a + (p.dirtyFields ? p.dirtyFields.length : 0), 0);
-                        showToast(`☁️ 同步成功！本次只上傳你修改過的 ${uploadFieldCount} 個欄位 (更新 ${result.count !== undefined ? result.count : '-'} 位學生)，其他資料保持雲端內容。`);
+                        const conflicts = Array.isArray(result.conflicts) ? result.conflicts : [];
+                        if (conflicts.length === 0) {
+                            showToast(`☁️ 同步成功！本次只上傳你修改過的 ${uploadFieldCount} 個欄位 (更新 ${result.count !== undefined ? result.count : '-'} 位學生)，其他資料保持雲端內容。`);
+                        } else {
+                            const sample = conflicts.slice(0, 3).map(c => `${c.name} ${fieldLabel(c.field)}`).join('、');
+                            showToast(`⚠️ 同步完成，但有 ${conflicts.length} 個欄位 (${sample}${conflicts.length > 3 ? '…' : ''}) 在你輸入期間已被其他老師修改，系統沒有覆蓋，畫面已更新為雲端最新值，請確認後再輸入。`, 'error', 12000);
+                        }
                         // 同步成功後自動讀回雲端，讓畫面立即顯示其他老師已輸入的成績 (本機未同步的輸入不會被覆蓋)
                         await loadDataFromCloud({ silent: true });
                     } else {
